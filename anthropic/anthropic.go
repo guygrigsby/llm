@@ -76,6 +76,8 @@ func (a *Adapter) observe(u anthropic.Usage, latency time.Duration) {
 		CompletionTokens: int(u.OutputTokens),
 		TotalTokens:      int(u.InputTokens + u.OutputTokens),
 		Latency:          latency,
+		CacheReadTokens:  int(u.CacheReadInputTokens),
+		CacheWriteTokens: int(u.CacheCreationInputTokens),
 	})
 }
 

@@ -13,6 +13,13 @@ type Usage struct {
 	CompletionTokens int           `json:"completion_tokens"`
 	TotalTokens      int           `json:"total_tokens"`
 	Latency          time.Duration `json:"latency"`
+	// CacheReadTokens and CacheWriteTokens split out prompt-caching input tokens
+	// so a Meter can price the cache tiers (read ~0.1x, write ~1.25x-2x base
+	// input) and measure hit rate. Zero when the provider reports no caching or
+	// none was requested. PromptTokens is the uncached-input remainder, so the
+	// three are additive: total input = PromptTokens + CacheReadTokens + CacheWriteTokens.
+	CacheReadTokens  int `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 // Meter observes per-call Usage. Set one on an adapter's Config to capture
