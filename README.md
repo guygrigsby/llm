@@ -1,30 +1,77 @@
 # llm
 
-The `LLM` port for [jess](https://github.com/guygrigsby/jess) /
-[agentcore](https://github.com/voocel/agentcore) agents, plus native,
-per-provider adapters that satisfy it.
+Small, native, per-provider model adapters for
+[agentcore](https://github.com/voocel/agentcore) /
+[jess](https://github.com/guygrigsby/jess) agents, behind one domain-named port:
+`llm.LLM`.
 
-`llm.LLM` names "the model the agent talks to" in domain language — it mirrors
-the agentcore `ChatModel` contract, so anything satisfying it plugs straight into
-`jess.WithModel`, without the rest of the codebase importing a vendor SDK.
+## Why
 
-Each adapter is **native and provider-specific**: it speaks that provider's own
-API/SDK, not an OpenAI-compatible translation layer. An adapter is an
-anti-corruption layer — the only package allowed to import its provider's SDK —
-translating it to and from agentcore message / tool / stream-event types.
+`agentcore.ChatModel` is the interface an agent talks to. `llm.LLM` is that same
+contract under a name that belongs to *your* domain, so the rest of your code
+never imports a vendor SDK. Each provider adapter is:
 
-## anthropic
+- **Native** — it speaks the provider's own API, not an OpenAI-compatibility
+  shim layered over a different provider.
+- **An anti-corruption layer** — the only package allowed to import that
+  provider's SDK, translating it to and from agentcore message / tool /
+  stream-event types.
 
-`github.com/guygrigsby/llm/anthropic` wraps `anthropic-sdk-go` as an `llm.LLM`.
-Adaptive thinking + effort; never sends temperature/top_p/top_k.
+Add a provider by adding a subpackage; the rest of your agent doesn't change.
+
+## Install
+
+```sh
+go get github.com/guygrigsby/llm
+```
+
+Requires Go 1.26+.
+
+## The port
+
+```go
+type LLM interface {
+	Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error)
+	GenerateStream(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (<-chan agentcore.StreamEvent, error)
+	SupportsTools() bool
+}
+```
+
+Anything satisfying `llm.LLM` is an `agentcore.ChatModel`, so it drops straight
+into `jess.WithModel`. agentcore types cross the boundary freely — they are the
+ubiquitous language jess is built on, not an isolated vendor. The isolated vendor
+is each provider's SDK, which only that provider's adapter imports.
+
+## Adapters
+
+### anthropic
+
+`github.com/guygrigsby/llm/anthropic` — native Anthropic adapter on the official
+[`anthropic-sdk-go`](https://github.com/anthropics/anthropic-sdk-go). Adaptive
+thinking + effort; never sends temperature/top_p/top_k. Full streaming and tool
+support.
 
 ```go
 m, err := anthropic.New(anthropic.Config{APIKey: key, Model: "claude-sonnet-5"})
 if err != nil {
-    return err
+	return err
 }
-agent := jess.New(jess.WithModel(m), /* ... */)
+agent := jess.New(jess.WithModel(m) /* , ... */)
 ```
 
-Extracted from gyr's `internal/model/anthropic` so gyr, johnny, and future
-services share one tested adapter.
+### deepseek
+
+`github.com/guygrigsby/llm/deepseek` — native DeepSeek adapter over its
+OpenAI-format chat-completions API, using only `net/http` (no SDK dependency).
+Built for cheap one-shot work such as summaries and extraction; tool-calling and
+true token streaming are not wired yet (`GenerateStream` returns the whole result
+as one terminal event). Wire those before using it as a primary conversational
+model.
+
+```go
+m, err := deepseek.New(deepseek.Config{APIKey: key, Model: "deepseek-chat"})
+```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
