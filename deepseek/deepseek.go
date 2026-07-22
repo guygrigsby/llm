@@ -32,6 +32,8 @@ type Config struct {
 	APIKey  string
 	Model   string // e.g. "deepseek-chat"
 	BaseURL string
+	// Meter, if set, receives token/latency Usage for every call.
+	Meter llm.Meter
 }
 
 // Adapter wraps DeepSeek's chat-completions API as an llm.LLM.
@@ -40,6 +42,7 @@ type Adapter struct {
 	model   string
 	baseURL string
 	http    *http.Client
+	meter   llm.Meter
 }
 
 // compile-time check: Adapter satisfies the llm.LLM port (agentcore.ChatModel).
@@ -62,7 +65,23 @@ func New(cfg Config) (*Adapter, error) {
 		model:   cfg.Model,
 		baseURL: strings.TrimRight(base, "/"),
 		http:    &http.Client{Timeout: 60 * time.Second},
+		meter:   cfg.Meter,
 	}, nil
+}
+
+// observe reports token/latency usage to the configured Meter, if any.
+func (a *Adapter) observe(prompt, completion, total int, latency time.Duration) {
+	if a.meter == nil {
+		return
+	}
+	a.meter.Observe(llm.Usage{
+		Provider:         "deepseek",
+		Model:            a.model,
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		TotalTokens:      total,
+		Latency:          latency,
+	})
 }
 
 // SupportsTools reports false: this adapter does not wire tool-calling yet.
@@ -84,6 +103,11 @@ type chatResponse struct {
 		Message      chatMessage `json:"message"`
 		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -107,6 +131,7 @@ func (a *Adapter) Generate(ctx context.Context, msgs []ac.Message, _ []ac.ToolSp
 	httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	start := time.Now()
 	resp, err := a.http.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("deepseek: request: %w", err)
@@ -127,6 +152,7 @@ func (a *Adapter) Generate(ctx context.Context, msgs []ac.Message, _ []ac.ToolSp
 	if len(cr.Choices) == 0 {
 		return nil, errors.New("deepseek: response had no choices")
 	}
+	a.observe(cr.Usage.PromptTokens, cr.Usage.CompletionTokens, cr.Usage.TotalTokens, time.Since(start))
 	return &ac.LLMResponse{Message: ac.Message{
 		Role:       ac.RoleAssistant,
 		Content:    []ac.ContentBlock{ac.TextBlock(cr.Choices[0].Message.Content)},

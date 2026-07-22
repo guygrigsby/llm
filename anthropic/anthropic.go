@@ -11,6 +11,7 @@ package anthropic
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -23,6 +24,7 @@ import (
 type Adapter struct {
 	client anthropic.Client
 	model  string
+	meter  llm.Meter
 }
 
 // Config configures the adapter. APIKey and Model are required; BaseURL is
@@ -31,6 +33,8 @@ type Config struct {
 	APIKey  string
 	Model   string
 	BaseURL string
+	// Meter, if set, receives token/latency Usage for every call.
+	Meter llm.Meter
 }
 
 // compile-time check: Adapter satisfies the llm.LLM port (structurally the
@@ -53,11 +57,27 @@ func New(cfg Config) (*Adapter, error) {
 	return &Adapter{
 		client: anthropic.NewClient(opts...),
 		model:  cfg.Model,
+		meter:  cfg.Meter,
 	}, nil
 }
 
 // SupportsTools reports that this provider supports tool calling.
 func (a *Adapter) SupportsTools() bool { return true }
+
+// observe reports token/latency usage to the configured Meter, if any.
+func (a *Adapter) observe(u anthropic.Usage, latency time.Duration) {
+	if a.meter == nil {
+		return
+	}
+	a.meter.Observe(llm.Usage{
+		Provider:         providerName,
+		Model:            a.model,
+		PromptTokens:     int(u.InputTokens),
+		CompletionTokens: int(u.OutputTokens),
+		TotalTokens:      int(u.InputTokens + u.OutputTokens),
+		Latency:          latency,
+	})
+}
 
 // ProviderName implements agentcore.ProviderNamer.
 func (a *Adapter) ProviderName() string { return providerName }
@@ -67,10 +87,12 @@ func (a *Adapter) Generate(ctx context.Context, messages []agentcore.Message, to
 	cfg := agentcore.ResolveCallConfig(opts)
 	params := buildParams(a.model, messages, tools, cfg, false)
 
+	start := time.Now()
 	resp, err := a.client.Messages.New(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: generate failed: %w", err)
 	}
+	a.observe(resp.Usage, time.Since(start))
 	return &agentcore.LLMResponse{Message: convertResponse(resp)}, nil
 }
 
@@ -88,12 +110,13 @@ func (a *Adapter) GenerateStream(ctx context.Context, messages []agentcore.Messa
 	cfg := agentcore.ResolveCallConfig(opts)
 	params := buildParams(a.model, messages, tools, cfg, true)
 
+	start := time.Now()
 	stream := a.client.Messages.NewStreaming(ctx, params)
 
 	out := make(chan agentcore.StreamEvent, 64)
 	go func() {
 		defer close(out)
-		emitStream(stream, out)
+		emitStream(stream, out, func(u anthropic.Usage) { a.observe(u, time.Since(start)) })
 	}()
 	return out, nil
 }
@@ -110,7 +133,7 @@ type streamReader interface {
 // agentcore StreamEvents and accumulating the final message. It uses an emitter
 // to track block boundaries so the start/delta/end framing matches the loop's
 // expectations.
-func emitStream(stream streamReader, out chan<- agentcore.StreamEvent) {
+func emitStream(stream streamReader, out chan<- agentcore.StreamEvent, onComplete func(anthropic.Usage)) {
 	var (
 		acc anthropic.Message
 		em  = &emitter{out: out}
@@ -126,6 +149,11 @@ func emitStream(stream streamReader, out chan<- agentcore.StreamEvent) {
 	if err := stream.Err(); err != nil {
 		out <- agentcore.StreamEvent{Type: agentcore.StreamEventError, Err: fmt.Errorf("anthropic: stream failed: %w", err)}
 		return
+	}
+
+	// Report token/latency usage once the message is fully accumulated.
+	if onComplete != nil {
+		onComplete(acc.Usage)
 	}
 
 	// Terminal done event: the fully assembled message, converted once so the

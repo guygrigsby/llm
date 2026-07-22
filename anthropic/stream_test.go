@@ -66,7 +66,7 @@ func TestEmitStream_TextThenToolCall(t *testing.T) {
 	out := make(chan agentcore.StreamEvent, 64)
 	go func() {
 		defer close(out)
-		emitStream(fs, out)
+		emitStream(fs, out, nil)
 	}()
 	events := collect(out)
 
@@ -130,7 +130,7 @@ func TestEmitStream_StreamError(t *testing.T) {
 	out := make(chan agentcore.StreamEvent, 16)
 	go func() {
 		defer close(out)
-		emitStream(fs, out)
+		emitStream(fs, out, nil)
 	}()
 	events := collect(out)
 	last := events[len(events)-1]

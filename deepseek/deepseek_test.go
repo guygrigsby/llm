@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/guygrigsby/llm"
 	ac "github.com/voocel/agentcore"
 )
 
@@ -32,6 +33,31 @@ func TestGenerate(t *testing.T) {
 	}
 	if got := resp.Message.TextContent(); got != "a short summary" {
 		t.Errorf("text = %q, want %q", got, "a short summary")
+	}
+}
+
+func TestGenerateMeters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}}`))
+	}))
+	defer srv.Close()
+
+	var got llm.Usage
+	a, _ := New(Config{
+		APIKey: "x", Model: "deepseek-chat", BaseURL: srv.URL,
+		Meter: llm.MeterFunc(func(u llm.Usage) { got = u }),
+	})
+	if _, err := a.Generate(context.Background(), []ac.Message{ac.UserMsg("hi")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got.PromptTokens != 11 || got.CompletionTokens != 3 || got.TotalTokens != 14 {
+		t.Errorf("usage tokens = %+v, want 11/3/14", got)
+	}
+	if got.Provider != "deepseek" || got.Model != "deepseek-chat" {
+		t.Errorf("provider/model = %q/%q", got.Provider, got.Model)
+	}
+	if got.Latency <= 0 {
+		t.Error("latency not measured")
 	}
 }
 
