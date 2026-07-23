@@ -92,6 +92,26 @@ model.
 m, err := deepseek.New(deepseek.Config{APIKey: key, Model: "deepseek-chat"})
 ```
 
+### kimi
+
+`github.com/guygrigsby/llm/kimi` — native Kimi (Moonshot) adapter over its
+OpenAI-format chat-completions API, using only `net/http` (no SDK dependency).
+Full scope: real SSE token streaming and tool calling, so `kimi-k3` works as a
+primary conversational model. Kimi-specific extensions beyond standard OpenAI
+are wired too: `reasoning_effort` (mapped from the call's thinking level, with
+the model's `reasoning_content` surfaced as a thinking block), partial mode
+(prefix continuation, triggered by `"partial": true` metadata on a trailing
+assistant message), and an `EstimateTokens` helper over the
+`/tokenizers/estimate-token-count` endpoint.
+
+```go
+m, err := kimi.New(kimi.Config{APIKey: key, Model: "kimi-k3"})
+if err != nil {
+	return err
+}
+agent := jess.New(jess.WithModel(m) /* , ... */)
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
