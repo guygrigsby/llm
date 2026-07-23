@@ -19,6 +19,26 @@ never imports a vendor SDK. Each provider adapter is:
 
 Add a provider by adding a subpackage; the rest of your agent doesn't change.
 
+## What it's not
+
+Not a gateway. If you want one process that fronts every provider behind an
+OpenAI-compatible endpoint, with routing, fallbacks, load balancing, budgets, and
+a proxy server, that's [LiteLLM](https://github.com/BerriAI/litellm) or
+[OpenRouter](https://openrouter.ai). `llm` is the opposite shape:
+
+- **A library, not a server.** No proxy, no gateway, no daemon. You import it;
+  calls go straight from your process to the provider.
+- **Native, not OpenAI-flattened.** Each adapter speaks its provider's real API
+  and can surface provider-specific behavior (Anthropic's thinking/effort),
+  instead of collapsing everything to a lowest-common-denominator shape.
+- **No orchestration baked in.** Routing, fallback, retries, load balancing,
+  response caching, cost and budget tracking are the agent's or caller's job,
+  not this layer's.
+- **No giant model registry.** You add the one or two adapters you actually use;
+  nothing else ships.
+
+One port (`llm.LLM`), native adapters behind it. That's the whole scope.
+
 ## Install
 
 ```sh
