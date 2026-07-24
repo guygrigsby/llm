@@ -228,6 +228,30 @@ func TestConvertMessages_SystemExtractedToTopLevel(t *testing.T) {
 	}
 }
 
+// TestBuildParams_SystemPromptCached: the system prefix carries a cache_control
+// breakpoint so a stable prompt becomes cheap cache reads on repeat turns.
+func TestBuildParams_SystemPromptCached(t *testing.T) {
+	p := buildParams("claude-opus-4-8", []agentcore.Message{
+		agentcore.SystemMsg("stable persona prefix"),
+		agentcore.UserMsg("hi"),
+	}, nil, agentcore.CallConfig{}, false)
+	if len(p.System) != 1 {
+		t.Fatalf("system blocks = %d, want 1", len(p.System))
+	}
+	if p.System[0].CacheControl.Type != "ephemeral" {
+		t.Errorf("system block not marked for caching: CacheControl = %+v", p.System[0].CacheControl)
+	}
+}
+
+// TestBuildParams_NoSystemNoCacheBlock: with no system message there is no
+// system block at all (nothing to cache, no empty block sent).
+func TestBuildParams_NoSystemNoCacheBlock(t *testing.T) {
+	p := buildParams("claude-opus-4-8", []agentcore.Message{agentcore.UserMsg("hi")}, nil, agentcore.CallConfig{}, false)
+	if len(p.System) != 0 {
+		t.Errorf("system blocks = %d, want 0 when no system message", len(p.System))
+	}
+}
+
 func marshalMessage(t *testing.T, m anthropic.MessageParam) map[string]any {
 	t.Helper()
 	raw, err := json.Marshal(m)

@@ -35,7 +35,15 @@ func buildParams(modelID string, messages []agentcore.Message, tools []agentcore
 	}
 
 	if sys := systemPrompt(messages); sys != "" {
-		params.System = []anthropic.TextBlockParam{{Text: sys}}
+		// Cache the system prefix: it is stable across a conversation (persona,
+		// voice, beliefs, summary), so a cache_control breakpoint here turns the
+		// large per-turn system tokens into cheap cache reads (~0.1x) after the
+		// first write. Below the model's minimum cacheable size Anthropic silently
+		// ignores the breakpoint, so this is safe for small system prompts too.
+		params.System = []anthropic.TextBlockParam{{
+			Text:         sys,
+			CacheControl: anthropic.NewCacheControlEphemeralParam(),
+		}}
 	}
 
 	if toolParams := convertTools(tools); len(toolParams) > 0 {
