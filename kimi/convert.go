@@ -27,6 +27,8 @@ type chatRequest struct {
 	StreamOptions   *streamOptions `json:"stream_options,omitempty"`
 	MaxTokens       int            `json:"max_completion_tokens,omitempty"`
 	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+	Temperature     *float64       `json:"temperature,omitempty"`
+	TopP            *float64       `json:"top_p,omitempty"`
 }
 
 type streamOptions struct {
@@ -96,12 +98,19 @@ type wireUsage struct {
 	CachedTokens     int `json:"cached_tokens"`
 }
 
+// genParams carries the adapter-level sampler settings (from the model profile)
+// into a request. Pointer fields mean "unset, do not send".
+type genParams struct {
+	Temperature *float64
+	TopP        *float64
+}
+
 // buildRequest assembles a chatRequest from agentcore inputs and the resolved
 // per-call config. reasoning_effort is set for kimi-k3-style models when the
 // call carries a thinking level; tool_choice and max_completion_tokens pass
 // through when set. streaming adds stream_options so the terminal chunk carries
 // usage.
-func buildRequest(model string, msgs []ac.Message, tools []ac.ToolSpec, cfg ac.CallConfig, stream bool) chatRequest {
+func buildRequest(model string, msgs []ac.Message, tools []ac.ToolSpec, cfg ac.CallConfig, gen genParams, stream bool) chatRequest {
 	req := chatRequest{
 		Model:           model,
 		Messages:        convertMessages(msgs),
@@ -110,6 +119,8 @@ func buildRequest(model string, msgs []ac.Message, tools []ac.ToolSpec, cfg ac.C
 		Stream:          stream,
 		MaxTokens:       cfg.MaxTokens,
 		ReasoningEffort: reasoningEffort(cfg.ThinkingLevel),
+		Temperature:     gen.Temperature,
+		TopP:            gen.TopP,
 	}
 	if stream {
 		req.StreamOptions = &streamOptions{IncludeUsage: true}

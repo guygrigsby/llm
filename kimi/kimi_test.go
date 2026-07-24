@@ -204,6 +204,39 @@ func TestGenerateHTTPError(t *testing.T) {
 	}
 }
 
+// TestSamplerParamsSent proves temperature/top_p are sent when the Config sets
+// them and omitted when nil.
+func TestSamplerParamsSent(t *testing.T) {
+	var body chatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	temp, topP := 0.6, 0.9
+	a, _ := New(Config{APIKey: "k", Model: "kimi-k3", BaseURL: srv.URL, Temperature: &temp, TopP: &topP})
+	if _, err := a.Generate(context.Background(), []ac.Message{ac.UserMsg("hi")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if body.Temperature == nil || *body.Temperature != 0.6 {
+		t.Errorf("temperature = %v, want 0.6", body.Temperature)
+	}
+	if body.TopP == nil || *body.TopP != 0.9 {
+		t.Errorf("top_p = %v, want 0.9", body.TopP)
+	}
+
+	// Unset: neither field on the wire.
+	body = chatRequest{}
+	b, _ := New(Config{APIKey: "k", Model: "kimi-k3", BaseURL: srv.URL})
+	if _, err := b.Generate(context.Background(), []ac.Message{ac.UserMsg("hi")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if body.Temperature != nil || body.TopP != nil {
+		t.Errorf("expected no sampler params, got temp=%v top_p=%v", body.Temperature, body.TopP)
+	}
+}
+
 func TestNewValidates(t *testing.T) {
 	if _, err := New(Config{Model: "kimi-k3"}); err == nil {
 		t.Error("want error without APIKey")

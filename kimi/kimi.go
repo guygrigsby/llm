@@ -41,15 +41,21 @@ type Config struct {
 	BaseURL string
 	// Meter, if set, receives token/latency Usage for every call.
 	Meter llm.Meter
+	// Temperature and TopP are optional sampler params. nil leaves them off the
+	// wire (the model's own default). Set by a per-model profile.
+	Temperature *float64
+	TopP        *float64
 }
 
 // Adapter wraps Kimi's chat-completions API as an llm.LLM.
 type Adapter struct {
-	apiKey  string
-	model   string
-	baseURL string
-	http    *http.Client
-	meter   llm.Meter
+	apiKey      string
+	model       string
+	baseURL     string
+	http        *http.Client
+	meter       llm.Meter
+	temperature *float64
+	topP        *float64
 }
 
 // compile-time check: Adapter satisfies the llm.LLM port (agentcore.ChatModel).
@@ -68,11 +74,13 @@ func New(cfg Config) (*Adapter, error) {
 		base = defaultBaseURL
 	}
 	return &Adapter{
-		apiKey:  cfg.APIKey,
-		model:   cfg.Model,
-		baseURL: strings.TrimRight(base, "/"),
-		http:    &http.Client{Timeout: 5 * time.Minute},
-		meter:   cfg.Meter,
+		apiKey:      cfg.APIKey,
+		model:       cfg.Model,
+		baseURL:     strings.TrimRight(base, "/"),
+		http:        &http.Client{Timeout: 5 * time.Minute},
+		meter:       cfg.Meter,
+		temperature: cfg.Temperature,
+		topP:        cfg.TopP,
 	}, nil
 }
 
@@ -93,7 +101,7 @@ func (a *Adapter) observe(u *wireUsage, latency time.Duration) {
 // Generate runs a one-shot chat completion.
 func (a *Adapter) Generate(ctx context.Context, msgs []ac.Message, tools []ac.ToolSpec, opts ...ac.CallOption) (*ac.LLMResponse, error) {
 	cfg := ac.ResolveCallConfig(opts)
-	req := buildRequest(a.model, msgs, tools, cfg, false)
+	req := buildRequest(a.model, msgs, tools, cfg, genParams{Temperature: a.temperature, TopP: a.topP}, false)
 
 	start := time.Now()
 	data, err := a.post(ctx, "/chat/completions", req, cfg.APIKey)
@@ -121,7 +129,7 @@ func (a *Adapter) Generate(ctx context.Context, msgs []ac.Message, tools []ac.To
 // failure. reasoning_content deltas become thinking events.
 func (a *Adapter) GenerateStream(ctx context.Context, msgs []ac.Message, tools []ac.ToolSpec, opts ...ac.CallOption) (<-chan ac.StreamEvent, error) {
 	cfg := ac.ResolveCallConfig(opts)
-	req := buildRequest(a.model, msgs, tools, cfg, true)
+	req := buildRequest(a.model, msgs, tools, cfg, genParams{Temperature: a.temperature, TopP: a.topP}, true)
 
 	body, err := json.Marshal(req)
 	if err != nil {
