@@ -16,9 +16,72 @@ import (
 	"time"
 
 	agentcore "github.com/voocel/agentcore"
+
+	"github.com/guygrigsby/llm"
 )
 
 const e2eModel = "claude-haiku-4-5"
+
+// e2eCacheModel is used by the prompt-caching test instead of e2eModel: the
+// minimum cacheable prefix is 4096 tokens on Haiku 4.5 but 1024 on Sonnet 5, and
+// below the minimum Anthropic silently ignores a breakpoint, so the cheaper model
+// would need a far larger filler prompt to prove anything. Sonnet 5 is also what
+// the companion actually runs.
+const e2eCacheModel = "claude-sonnet-5"
+
+// recordingMeter captures the Usage the adapter reports for each call.
+type recordingMeter struct{ usage []llm.Usage }
+
+func (m *recordingMeter) Observe(u llm.Usage) { m.usage = append(m.usage, u) }
+
+// TestE2E_PromptCachingReadsGrowWithHistory proves both breakpoints against the
+// live API. Turn 1 writes. Turn 2 reads, since the system prefix is unchanged.
+// Turn 3 must read strictly more than turn 2: the system block is byte-identical
+// across all three, so the only way the read can grow is if the conversation
+// history is cached too, which is the top-level breakpoint doing its job.
+func TestE2E_PromptCachingReadsGrowWithHistory(t *testing.T) {
+	key := os.Getenv("ANTHROPIC_API_KEY")
+	if key == "" {
+		t.Skip("ANTHROPIC_API_KEY not set; skipping live e2e test")
+	}
+	// Over the 1024-token minimum for Sonnet 5, and byte-identical every turn.
+	system := strings.Repeat("You are a terse assistant working from a long stable briefing. ", 200)
+
+	var meter recordingMeter
+	a, err := New(Config{APIKey: key, Model: e2eCacheModel, Meter: &meter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	msgs := []agentcore.Message{agentcore.SystemMsg(system)}
+	for i, ask := range []string{"say the word one", "say the word two", "say the word three"} {
+		msgs = append(msgs, agentcore.UserMsg(ask))
+		resp, err := a.Generate(ctx, msgs, nil, agentcore.WithMaxTokens(64), agentcore.WithThinking(agentcore.ThinkingOff))
+		if err != nil {
+			t.Fatalf("turn %d: %v", i+1, err)
+		}
+		msgs = append(msgs, resp.Message)
+	}
+	if len(meter.usage) != 3 {
+		t.Fatalf("metered calls = %d, want 3", len(meter.usage))
+	}
+	for i, u := range meter.usage {
+		t.Logf("turn %d: prompt=%d cache_read=%d cache_write=%d", i+1, u.PromptTokens, u.CacheReadTokens, u.CacheWriteTokens)
+	}
+
+	if meter.usage[0].CacheWriteTokens == 0 {
+		t.Errorf("turn 1 wrote nothing to cache: %+v", meter.usage[0])
+	}
+	if meter.usage[1].CacheReadTokens == 0 {
+		t.Errorf("turn 2 read nothing from cache: %+v", meter.usage[1])
+	}
+	if meter.usage[2].CacheReadTokens <= meter.usage[1].CacheReadTokens {
+		t.Errorf("cache read did not grow with history: turn 2 = %d, turn 3 = %d; history is not being cached",
+			meter.usage[1].CacheReadTokens, meter.usage[2].CacheReadTokens)
+	}
+}
 
 func e2eAdapter(t *testing.T) *Adapter {
 	t.Helper()

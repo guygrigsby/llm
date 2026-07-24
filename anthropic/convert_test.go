@@ -243,6 +243,75 @@ func TestBuildParams_SystemPromptCached(t *testing.T) {
 	}
 }
 
+// TestBuildParams_SystemCacheTTL1h: the system prefix is cached for an hour, not
+// the 5m default. A companion's turns are minutes to hours apart, so a 5m entry
+// expires between them and every turn pays a write instead of a read.
+func TestBuildParams_SystemCacheTTL1h(t *testing.T) {
+	p := buildParams("claude-sonnet-5", []agentcore.Message{
+		agentcore.SystemMsg("stable persona prefix"),
+		agentcore.UserMsg("hi"),
+	}, nil, agentcore.CallConfig{}, false)
+	if len(p.System) != 1 {
+		t.Fatalf("system blocks = %d, want 1", len(p.System))
+	}
+	if got := p.System[0].CacheControl.TTL; got != anthropic.CacheControlEphemeralTTLTTL1h {
+		t.Errorf("system TTL = %q, want 1h", got)
+	}
+}
+
+// TestBuildParams_HistoryCached: the system block is only half the prefix. The
+// conversation history behind it is the larger, growing half, and one breakpoint
+// on system leaves all of it uncached. Top-level cache control marks the last
+// cacheable block, so the next turn reads the prefix through the previous turn
+// and writes only the new exchange.
+func TestBuildParams_HistoryCached(t *testing.T) {
+	p := buildParams("claude-sonnet-5", []agentcore.Message{
+		agentcore.SystemMsg("stable persona prefix"),
+		agentcore.UserMsg("hey"),
+		{Role: agentcore.RoleAssistant, Content: []agentcore.ContentBlock{agentcore.TextBlock("hey yourself")}},
+		agentcore.UserMsg("what's up"),
+	}, nil, agentcore.CallConfig{}, false)
+	if got := p.CacheControl.TTL; got != anthropic.CacheControlEphemeralTTLTTL1h {
+		t.Errorf("history TTL = %q, want 1h", got)
+	}
+	// Assert the wire shape, not just the struct: what the API acts on is the JSON,
+	// and both markers have to reach it for the two breakpoints to exist.
+	wire := marshalParams(t, p)
+	top, ok := wire["cache_control"].(map[string]any)
+	if !ok {
+		t.Fatalf("no top-level cache_control on the wire: %v", wire["cache_control"])
+	}
+	if top["type"] != "ephemeral" || top["ttl"] != "1h" {
+		t.Errorf("top-level cache_control = %v, want ephemeral 1h", top)
+	}
+	sys, ok := wire["system"].([]any)
+	if !ok || len(sys) != 1 {
+		t.Fatalf("system on the wire = %v, want one block", wire["system"])
+	}
+	block, _ := sys[0].(map[string]any)
+	cc, ok := block["cache_control"].(map[string]any)
+	if !ok {
+		t.Fatalf("no cache_control on the system block: %v", block)
+	}
+	if cc["type"] != "ephemeral" || cc["ttl"] != "1h" {
+		t.Errorf("system cache_control = %v, want ephemeral 1h", cc)
+	}
+}
+
+// TestBuildParams_OneShotNotCached: a one-shot call (summarize, reflect, extract)
+// is a single user message with no system prefix, over a transcript that never
+// repeats, so a cache entry for it is written and never read. Paying the write
+// premium there is a straight loss, so the history breakpoint is gated on having
+// a system prefix, which is what marks the agent loop.
+func TestBuildParams_OneShotNotCached(t *testing.T) {
+	p := buildParams("claude-sonnet-5", []agentcore.Message{
+		agentcore.UserMsg("summarize this transcript: ..."),
+	}, nil, agentcore.CallConfig{}, false)
+	if p.CacheControl.Type != "" {
+		t.Errorf("one-shot call marked for caching: %+v", p.CacheControl)
+	}
+}
+
 // TestBuildParams_NoSystemNoCacheBlock: with no system message there is no
 // system block at all (nothing to cache, no empty block sent).
 func TestBuildParams_NoSystemNoCacheBlock(t *testing.T) {

@@ -3,6 +3,7 @@ package anthropic
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	agentcore "github.com/voocel/agentcore"
@@ -35,15 +36,36 @@ func buildParams(modelID string, messages []agentcore.Message, tools []agentcore
 	}
 
 	if sys := systemPrompt(messages); sys != "" {
-		// Cache the system prefix: it is stable across a conversation (persona,
-		// voice, beliefs, summary), so a cache_control breakpoint here turns the
-		// large per-turn system tokens into cheap cache reads (~0.1x) after the
-		// first write. Below the model's minimum cacheable size Anthropic silently
-		// ignores the breakpoint, so this is safe for small system prompts too.
+		// Two breakpoints, both 1h. The system prefix is stable across a
+		// conversation (persona, voice, beliefs, summary), so caching it turns the
+		// large per-turn system tokens into cheap reads (~0.1x) after the first
+		// write. Top-level cache control marks the last cacheable block, i.e. the
+		// end of the conversation history, which is the other half of the prefix and
+		// the half that grows: with only the system breakpoint, every turn re-pays
+		// full price on the whole transcript. Next turn reads through the previous
+		// turn and writes only the new exchange.
+		//
+		// 1h rather than the 5m default because the caller is a chat companion whose
+		// turns are minutes to hours apart; at 5m the entry is usually expired by the
+		// next message, which is a write every turn and a read almost never. Writes
+		// cost 2x at 1h instead of 1.25x, so this trades a dearer write for actually
+		// getting the read.
+		//
+		// Gated on a system prompt: that is what distinguishes the agent loop, with
+		// a prefix worth reusing, from a one-shot call over a transcript that never
+		// repeats, where a cache entry is written and never read.
+		//
+		// Below the model's minimum cacheable prefix Anthropic silently ignores a
+		// breakpoint, so this is safe for small prompts too.
+		// ponytail: two breakpoints, no per-turn placement math. A breakpoint looks
+		// back at most 20 content blocks for a prior entry, so a turn that emits more
+		// than that (many tool calls) can miss; add an intermediate breakpoint if
+		// tool use ever gets that heavy.
 		params.System = []anthropic.TextBlockParam{{
 			Text:         sys,
-			CacheControl: anthropic.NewCacheControlEphemeralParam(),
+			CacheControl: cacheFor1h(),
 		}}
+		params.CacheControl = cacheFor1h()
 	}
 
 	if toolParams := convertTools(tools); len(toolParams) > 0 {
@@ -53,6 +75,14 @@ func buildParams(modelID string, messages []agentcore.Message, tools []agentcore
 	applyThinking(&params, cfg.ThinkingLevel)
 
 	return params
+}
+
+// cacheFor1h is the cache_control marker both breakpoints use. Named so the TTL
+// choice lives in one place rather than being repeated at each site.
+func cacheFor1h() anthropic.CacheControlEphemeralParam {
+	cc := anthropic.NewCacheControlEphemeralParam()
+	cc.TTL = anthropic.CacheControlEphemeralTTLTTL1h
+	return cc
 }
 
 // resolveMaxTokens picks the per-call max_tokens, falling back to a sane default
@@ -109,13 +139,13 @@ func mapEffort(level agentcore.ThinkingLevel) (anthropic.OutputConfigEffort, boo
 // Anthropic carries the system prompt out-of-band (the top-level System field),
 // not as a message in the messages array.
 func systemPrompt(messages []agentcore.Message) string {
-	var out string
+	var b strings.Builder
 	for _, msg := range messages {
 		if msg.Role == agentcore.RoleSystem {
-			out += msg.TextContent()
+			b.WriteString(msg.TextContent())
 		}
 	}
-	return out
+	return b.String()
 }
 
 // convertMessages maps agentcore messages to Anthropic message params. System
