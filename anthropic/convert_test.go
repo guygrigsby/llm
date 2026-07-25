@@ -259,31 +259,17 @@ func TestBuildParams_SystemCacheTTL1h(t *testing.T) {
 	}
 }
 
-// TestBuildParams_HistoryCached: the system block is only half the prefix. The
-// conversation history behind it is the larger, growing half, and one breakpoint
-// on system leaves all of it uncached. Top-level cache control marks the last
-// cacheable block, so the next turn reads the prefix through the previous turn
-// and writes only the new exchange.
-func TestBuildParams_HistoryCached(t *testing.T) {
+// TestBuildParams_SystemCacheOnTheWire: assert the JSON, not just the struct.
+// The struct's Type is a constant field whose zero value still marshals as
+// "ephemeral", so a struct-only check passes even when the marker is malformed.
+func TestBuildParams_SystemCacheOnTheWire(t *testing.T) {
 	p := buildParams("claude-sonnet-5", []agentcore.Message{
 		agentcore.SystemMsg("stable persona prefix"),
 		agentcore.UserMsg("hey"),
 		{Role: agentcore.RoleAssistant, Content: []agentcore.ContentBlock{agentcore.TextBlock("hey yourself")}},
 		agentcore.UserMsg("what's up"),
 	}, nil, agentcore.CallConfig{}, false)
-	if got := p.CacheControl.TTL; got != anthropic.CacheControlEphemeralTTLTTL1h {
-		t.Errorf("history TTL = %q, want 1h", got)
-	}
-	// Assert the wire shape, not just the struct: what the API acts on is the JSON,
-	// and both markers have to reach it for the two breakpoints to exist.
 	wire := marshalParams(t, p)
-	top, ok := wire["cache_control"].(map[string]any)
-	if !ok {
-		t.Fatalf("no top-level cache_control on the wire: %v", wire["cache_control"])
-	}
-	if top["type"] != "ephemeral" || top["ttl"] != "1h" {
-		t.Errorf("top-level cache_control = %v, want ephemeral 1h", top)
-	}
 	sys, ok := wire["system"].([]any)
 	if !ok || len(sys) != 1 {
 		t.Fatalf("system on the wire = %v, want one block", wire["system"])
@@ -298,17 +284,22 @@ func TestBuildParams_HistoryCached(t *testing.T) {
 	}
 }
 
-// TestBuildParams_OneShotNotCached: a one-shot call (summarize, reflect, extract)
-// is a single user message with no system prefix, over a transcript that never
-// repeats, so a cache entry for it is written and never read. Paying the write
-// premium there is a straight loss, so the history breakpoint is gated on having
-// a system prefix, which is what marks the agent loop.
-func TestBuildParams_OneShotNotCached(t *testing.T) {
+// TestBuildParams_HistoryNotCached pins the deliberate absence of a second
+// breakpoint. Top-level cache control marks the last cacheable block, which
+// covers the conversation history, and under a caller whose history prefix is not
+// byte-stable turn to turn that entry is rewritten rather than read: at 1h a
+// rewrite costs 2x where the same tokens uncached cost 1x, measured at ~1.9x per
+// turn on the companion. See the note in buildParams for the two conditions that
+// have to hold before this comes back.
+func TestBuildParams_HistoryNotCached(t *testing.T) {
 	p := buildParams("claude-sonnet-5", []agentcore.Message{
-		agentcore.UserMsg("summarize this transcript: ..."),
+		agentcore.SystemMsg("stable persona prefix"),
+		agentcore.UserMsg("hey"),
+		{Role: agentcore.RoleAssistant, Content: []agentcore.ContentBlock{agentcore.TextBlock("hey yourself")}},
+		agentcore.UserMsg("what's up"),
 	}, nil, agentcore.CallConfig{}, false)
-	if p.CacheControl.Type != "" {
-		t.Errorf("one-shot call marked for caching: %+v", p.CacheControl)
+	if _, marked := marshalParams(t, p)["cache_control"]; marked {
+		t.Error("top-level cache_control is set; history caching is a cost regression until the prefix is stable")
 	}
 }
 

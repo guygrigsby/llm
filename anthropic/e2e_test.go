@@ -34,12 +34,11 @@ type recordingMeter struct{ usage []llm.Usage }
 
 func (m *recordingMeter) Observe(u llm.Usage) { m.usage = append(m.usage, u) }
 
-// TestE2E_PromptCachingReadsGrowWithHistory proves both breakpoints against the
-// live API. Turn 1 writes. Turn 2 reads, since the system prefix is unchanged.
-// Turn 3 must read strictly more than turn 2: the system block is byte-identical
-// across all three, so the only way the read can grow is if the conversation
-// history is cached too, which is the top-level breakpoint doing its job.
-func TestE2E_PromptCachingReadsGrowWithHistory(t *testing.T) {
+// TestE2E_SystemPrefixIsReadFromCache proves the system breakpoint against the
+// live API: turn 1 writes the prefix, later turns read it back instead of paying
+// full price. The read stays flat because only the system block is marked; the
+// history is not (see the note in buildParams).
+func TestE2E_SystemPrefixIsReadFromCache(t *testing.T) {
 	key := os.Getenv("ANTHROPIC_API_KEY")
 	if key == "" {
 		t.Skip("ANTHROPIC_API_KEY not set; skipping live e2e test")
@@ -77,8 +76,10 @@ func TestE2E_PromptCachingReadsGrowWithHistory(t *testing.T) {
 	if meter.usage[1].CacheReadTokens == 0 {
 		t.Errorf("turn 2 read nothing from cache: %+v", meter.usage[1])
 	}
-	if meter.usage[2].CacheReadTokens <= meter.usage[1].CacheReadTokens {
-		t.Errorf("cache read did not grow with history: turn 2 = %d, turn 3 = %d; history is not being cached",
+	// The system block is byte-identical across all three turns, so what it reads
+	// back must not shrink as the conversation grows.
+	if meter.usage[2].CacheReadTokens < meter.usage[1].CacheReadTokens {
+		t.Errorf("cache read shrank: turn 2 = %d, turn 3 = %d",
 			meter.usage[1].CacheReadTokens, meter.usage[2].CacheReadTokens)
 	}
 }

@@ -36,36 +36,38 @@ func buildParams(modelID string, messages []agentcore.Message, tools []agentcore
 	}
 
 	if sys := systemPrompt(messages); sys != "" {
-		// Two breakpoints, both 1h. The system prefix is stable across a
-		// conversation (persona, voice, beliefs, summary), so caching it turns the
-		// large per-turn system tokens into cheap reads (~0.1x) after the first
-		// write. Top-level cache control marks the last cacheable block, i.e. the
-		// end of the conversation history, which is the other half of the prefix and
-		// the half that grows: with only the system breakpoint, every turn re-pays
-		// full price on the whole transcript. Next turn reads through the previous
-		// turn and writes only the new exchange.
-		//
-		// 1h rather than the 5m default because the caller is a chat companion whose
-		// turns are minutes to hours apart; at 5m the entry is usually expired by the
-		// next message, which is a write every turn and a read almost never. Writes
-		// cost 2x at 1h instead of 1.25x, so this trades a dearer write for actually
-		// getting the read.
+		// One breakpoint, on the system prefix, held for an hour. The prefix is
+		// stable across a conversation (persona, voice, beliefs, summary), so caching
+		// it turns the large per-turn system tokens into cheap reads (~0.1x) after
+		// the first write. 1h rather than the 5m default because the caller is a chat
+		// companion whose turns are minutes to hours apart; at 5m the entry is
+		// usually expired by the next message, which is a write every turn and a read
+		// almost never.
 		//
 		// Gated on a system prompt: that is what distinguishes the agent loop, with
 		// a prefix worth reusing, from a one-shot call over a transcript that never
-		// repeats, where a cache entry is written and never read.
+		// repeats, where an entry would be written and never read.
 		//
 		// Below the model's minimum cacheable prefix Anthropic silently ignores a
 		// breakpoint, so this is safe for small prompts too.
-		// ponytail: two breakpoints, no per-turn placement math. A breakpoint looks
-		// back at most 20 content blocks for a prior entry, so a turn that emits more
-		// than that (many tool calls) can miss; add an intermediate breakpoint if
-		// tool use ever gets that heavy.
+		//
+		// NO second breakpoint on the conversation history, deliberately. It works in
+		// isolation (see the e2e test) but is a ~1.9x cost regression under the real
+		// caller, because the history prefix is not byte-stable turn to turn and the
+		// entry is rewritten instead of read: at 1h a rewrite costs 2x where the same
+		// tokens uncached cost 1x. Two things have to be true before adding it back,
+		// and both are outside this package:
+		//   - the recalled-memory block must come after the conversation, not before
+		//     it (jess prepends it as the first user message, and its content is
+		//     scored per turn, so it differs every turn),
+		//   - history trimming must drop turns in chunks, not one turn per reply,
+		//     or the prefix start shifts on every call.
+		// Measured: full-price input 2 tokens, cache read flat at ~2741, cache write
+		// ~1725 every turn, read never growing.
 		params.System = []anthropic.TextBlockParam{{
 			Text:         sys,
 			CacheControl: cacheFor1h(),
 		}}
-		params.CacheControl = cacheFor1h()
 	}
 
 	if toolParams := convertTools(tools); len(toolParams) > 0 {
