@@ -51,19 +51,12 @@ func buildParams(modelID string, messages []agentcore.Message, tools []agentcore
 		// Below the model's minimum cacheable prefix Anthropic silently ignores a
 		// breakpoint, so this is safe for small prompts too.
 		//
-		// NO second breakpoint on the conversation history, deliberately. It works in
-		// isolation (see the e2e test) but is a ~1.9x cost regression under the real
-		// caller, because the history prefix is not byte-stable turn to turn and the
-		// entry is rewritten instead of read: at 1h a rewrite costs 2x where the same
-		// tokens uncached cost 1x. Two things have to be true before adding it back,
-		// and both are outside this package:
-		//   - the recalled-memory block must come after the conversation, not before
-		//     it (jess prepends it as the first user message, and its content is
-		//     scored per turn, so it differs every turn),
-		//   - history trimming must drop turns in chunks, not one turn per reply,
-		//     or the prefix start shifts on every call.
-		// Measured: full-price input 2 tokens, cache read flat at ~2741, cache write
-		// ~1725 every turn, read never growing.
+		// A second breakpoint, covering the conversation history, is the caller's to
+		// place: see markCacheBreakpoint. This package will not guess at it. Marking
+		// the last block automatically (top-level cache control) measured as a ~1.9x
+		// per-turn cost regression on a companion, because the block the caller
+		// appends last is the one it rebuilds every turn, so the entry was rewritten
+		// at 2x rather than read at 0.1x.
 		params.System = []anthropic.TextBlockParam{{
 			Text:         sys,
 			CacheControl: cacheFor1h(),
@@ -158,6 +151,7 @@ func systemPrompt(messages []agentcore.Message) string {
 func convertMessages(messages []agentcore.Message) []anthropic.MessageParam {
 	out := make([]anthropic.MessageParam, 0, len(messages))
 	for _, msg := range messages {
+		before := len(out)
 		switch msg.Role {
 		case agentcore.RoleSystem:
 			// Carried via params.System.
@@ -174,8 +168,41 @@ func convertMessages(messages []agentcore.Message) []anthropic.MessageParam {
 				out = append(out, anthropic.NewAssistantMessage(blocks...))
 			}
 		}
+		if len(out) > before && hasCacheBreakpoint(msg) {
+			markCacheBreakpoint(&out[len(out)-1])
+		}
 	}
 	return out
+}
+
+// hasCacheBreakpoint reports whether the caller marked this message as the end of
+// the stable prefix, using Metadata["cache_control"] (the key agentcore's own
+// cache orchestration writes). Only presence matters here; the value names a
+// provider-agnostic intent and this adapter picks the TTL.
+func hasCacheBreakpoint(msg agentcore.Message) bool {
+	v, ok := msg.Metadata["cache_control"]
+	if !ok {
+		return false
+	}
+	s, ok := v.(string)
+	return ok && s != ""
+}
+
+// markCacheBreakpoint puts a cache_control marker on a message's last content
+// block, which is where a breakpoint has to sit to cover everything up to and
+// including that message. Placement is the caller's decision because only the
+// caller knows which trailing content it rebuilds every turn; a breakpoint past
+// that content is rewritten rather than read.
+//
+// Silently does nothing for a block type that carries no cache_control. A missing
+// breakpoint costs a cache read, never correctness.
+func markCacheBreakpoint(m *anthropic.MessageParam) {
+	if len(m.Content) == 0 {
+		return
+	}
+	if cc := m.Content[len(m.Content)-1].GetCacheControl(); cc != nil {
+		*cc = cacheFor1h()
+	}
 }
 
 // userContentBlocks builds the content blocks for a user message. v1 handles

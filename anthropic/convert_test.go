@@ -284,14 +284,12 @@ func TestBuildParams_SystemCacheOnTheWire(t *testing.T) {
 	}
 }
 
-// TestBuildParams_HistoryNotCached pins the deliberate absence of a second
-// breakpoint. Top-level cache control marks the last cacheable block, which
-// covers the conversation history, and under a caller whose history prefix is not
-// byte-stable turn to turn that entry is rewritten rather than read: at 1h a
-// rewrite costs 2x where the same tokens uncached cost 1x, measured at ~1.9x per
-// turn on the companion. See the note in buildParams for the two conditions that
-// have to hold before this comes back.
-func TestBuildParams_HistoryNotCached(t *testing.T) {
+// TestBuildParams_NoTopLevelAutoCache: top-level cache control marks whatever the
+// last cacheable block happens to be. When the caller appends volatile content
+// (per-turn recalled memories) that is the volatile block itself, and an entry
+// covering it is never a prefix of the next request, so it gets rewritten every
+// turn instead of read. Placement is the caller's call, via metadata.
+func TestBuildParams_NoTopLevelAutoCache(t *testing.T) {
 	p := buildParams("claude-sonnet-5", []agentcore.Message{
 		agentcore.SystemMsg("stable persona prefix"),
 		agentcore.UserMsg("hey"),
@@ -299,7 +297,54 @@ func TestBuildParams_HistoryNotCached(t *testing.T) {
 		agentcore.UserMsg("what's up"),
 	}, nil, agentcore.CallConfig{}, false)
 	if _, marked := marshalParams(t, p)["cache_control"]; marked {
-		t.Error("top-level cache_control is set; history caching is a cost regression until the prefix is stable")
+		t.Error("top-level cache_control is set; the last block is not reliably the end of the stable prefix")
+	}
+}
+
+// TestBuildParams_CacheBreakpointFromMetadata: the caller says where the stable
+// prefix ends by stamping Metadata["cache_control"] (the key agentcore already
+// uses), and the adapter puts the breakpoint on that message's last content block.
+// Anything appended after it, e.g. a per-turn memory block, stays outside the
+// cached span, so the next turn can still read the span back.
+func TestBuildParams_CacheBreakpointFromMetadata(t *testing.T) {
+	p := buildParams("claude-sonnet-5", []agentcore.Message{
+		agentcore.SystemMsg("stable persona prefix"),
+		agentcore.UserMsg("hey"),
+		{
+			Role:     agentcore.RoleAssistant,
+			Content:  []agentcore.ContentBlock{agentcore.TextBlock("hey yourself")},
+			Metadata: map[string]any{"cache_control": "ephemeral"},
+		},
+		agentcore.UserMsg("Relevant memories for this conversation: ..."), // volatile tail
+	}, nil, agentcore.CallConfig{}, false)
+
+	wire := marshalParams(t, p)
+	msgs, ok := wire["messages"].([]any)
+	if !ok || len(msgs) != 3 {
+		t.Fatalf("messages on the wire = %v, want 3", wire["messages"])
+	}
+	lastBlockOf := func(i int) map[string]any {
+		t.Helper()
+		m, _ := msgs[i].(map[string]any)
+		blocks, _ := m["content"].([]any)
+		if len(blocks) == 0 {
+			t.Fatalf("message %d has no content blocks: %v", i, m)
+		}
+		b, _ := blocks[len(blocks)-1].(map[string]any)
+		return b
+	}
+	cc, ok := lastBlockOf(1)["cache_control"].(map[string]any)
+	if !ok {
+		t.Fatalf("marked message carries no cache_control: %v", lastBlockOf(1))
+	}
+	if cc["type"] != "ephemeral" || cc["ttl"] != "1h" {
+		t.Errorf("breakpoint = %v, want ephemeral 1h", cc)
+	}
+	if _, marked := lastBlockOf(2)["cache_control"]; marked {
+		t.Error("volatile trailing message must not carry a breakpoint")
+	}
+	if _, marked := lastBlockOf(0)["cache_control"]; marked {
+		t.Error("unmarked message must not carry a breakpoint")
 	}
 }
 
