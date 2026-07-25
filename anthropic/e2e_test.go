@@ -10,6 +10,7 @@ package anthropic
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -34,11 +35,12 @@ type recordingMeter struct{ usage []llm.Usage }
 
 func (m *recordingMeter) Observe(u llm.Usage) { m.usage = append(m.usage, u) }
 
-// TestE2E_SystemPrefixIsReadFromCache proves the system breakpoint against the
-// live API: turn 1 writes the prefix, later turns read it back instead of paying
-// full price. The read stays flat because only the system block is marked; the
-// history is not (see the note in buildParams).
-func TestE2E_SystemPrefixIsReadFromCache(t *testing.T) {
+// TestE2E_CachedSpanGrowsWithHistory proves the real prompt shape against the live
+// API: system prefix cached, conversation cached up to a caller-marked breakpoint,
+// and a volatile per-turn block after it. Turn 1 writes. Turn 2 reads. Turn 3 must
+// read strictly more than turn 2, which only happens if the conversation itself is
+// being read back and not just the fixed system block.
+func TestE2E_CachedSpanGrowsWithHistory(t *testing.T) {
 	key := os.Getenv("ANTHROPIC_API_KEY")
 	if key == "" {
 		t.Skip("ANTHROPIC_API_KEY not set; skipping live e2e test")
@@ -57,7 +59,16 @@ func TestE2E_SystemPrefixIsReadFromCache(t *testing.T) {
 	msgs := []agentcore.Message{agentcore.SystemMsg(system)}
 	for i, ask := range []string{"say the word one", "say the word two", "say the word three"} {
 		msgs = append(msgs, agentcore.UserMsg(ask))
-		resp, err := a.Generate(ctx, msgs, nil, agentcore.WithMaxTokens(64), agentcore.WithThinking(agentcore.ThinkingOff))
+		// Mark the newest turn as the end of the stable prefix and append a volatile
+		// block after it, the shape the companion sends: history cached, per-turn
+		// recalled memories outside the cached span.
+		req := append([]agentcore.Message(nil), msgs...)
+		last := req[len(req)-1]
+		last.Metadata = map[string]any{"cache_control": "ephemeral"}
+		req[len(req)-1] = last
+		req = append(req, agentcore.UserMsg(fmt.Sprintf("Relevant memories for this conversation: note %d", i)))
+
+		resp, err := a.Generate(ctx, req, nil, agentcore.WithMaxTokens(64), agentcore.WithThinking(agentcore.ThinkingOff))
 		if err != nil {
 			t.Fatalf("turn %d: %v", i+1, err)
 		}
@@ -76,10 +87,8 @@ func TestE2E_SystemPrefixIsReadFromCache(t *testing.T) {
 	if meter.usage[1].CacheReadTokens == 0 {
 		t.Errorf("turn 2 read nothing from cache: %+v", meter.usage[1])
 	}
-	// The system block is byte-identical across all three turns, so what it reads
-	// back must not shrink as the conversation grows.
-	if meter.usage[2].CacheReadTokens < meter.usage[1].CacheReadTokens {
-		t.Errorf("cache read shrank: turn 2 = %d, turn 3 = %d",
+	if meter.usage[2].CacheReadTokens <= meter.usage[1].CacheReadTokens {
+		t.Errorf("cache read did not grow with history: turn 2 = %d, turn 3 = %d; only the system block is being read back",
 			meter.usage[1].CacheReadTokens, meter.usage[2].CacheReadTokens)
 	}
 }
