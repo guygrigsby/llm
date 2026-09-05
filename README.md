@@ -118,11 +118,7 @@ agent := jess.New(jess.WithModel(m) /* , ... */)
 OpenAI-format chat-completions API, using only `net/http` (no SDK dependency).
 One key, any OpenRouter model id per adapter (`moonshotai/kimi-k3`,
 `anthropic/claude-opus-5`, ...). Full scope: SSE token streaming and tool
-calling. OpenRouter extensions are wired: the `reasoning` request object
-(effort mapped from the call's thinking level, the model's reasoning surfaced as
-a thinking block, and `reasoning_details` echoed back on assistant messages so
-the model keeps its chain of thought across tool calls). Usage accounting reaches
-the `Meter` with `cost` and cached prompt tokens.
+calling. OpenRouter extensions are wired: the `reasoning` request object with effort mapped from the call's thinking level; the model's reasoning surfaced as a thinking block; `reasoning_details` echoed back on assistant messages so the model keeps its chain of thought across tool calls. Usage accounting reaches the `Meter` with `cost` and cached prompt tokens.
 
 ```go
 m, err := openrouter.New(openrouter.Config{APIKey: key, Model: "moonshotai/kimi-k3", Title: "my-app"})
