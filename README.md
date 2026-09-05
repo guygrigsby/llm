@@ -121,8 +121,8 @@ One key, any OpenRouter model id per adapter (`moonshotai/kimi-k3`,
 calling. OpenRouter extensions are wired: the `reasoning` request object
 (effort mapped from the call's thinking level, the model's reasoning surfaced as
 a thinking block, and `reasoning_details` echoed back on assistant messages so
-the model keeps its chain of thought across tool calls), and usage accounting
-with `cost` and cached prompt tokens reaching the `Meter`.
+the model keeps its chain of thought across tool calls). Usage accounting reaches
+the `Meter` with `cost` and cached prompt tokens.
 
 ```go
 m, err := openrouter.New(openrouter.Config{APIKey: key, Model: "moonshotai/kimi-k3", Title: "my-app"})
