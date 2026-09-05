@@ -15,7 +15,6 @@
 package openrouter
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +25,7 @@ import (
 	"time"
 
 	"github.com/guygrigsby/llm"
+	"github.com/guygrigsby/llm/internal/openaiwire"
 	ac "github.com/voocel/agentcore"
 )
 
@@ -53,12 +53,8 @@ type Config struct {
 
 // Adapter wraps OpenRouter's chat-completions API as an llm.LLM.
 type Adapter struct {
-	apiKey      string
 	model       string
-	baseURL     string
-	referer     string
-	title       string
-	http        *http.Client
+	client      openaiwire.Client
 	meter       llm.Meter
 	temperature *float64
 	topP        *float64
@@ -79,13 +75,22 @@ func New(cfg Config) (*Adapter, error) {
 	if base == "" {
 		base = defaultBaseURL
 	}
+	headers := map[string]string{}
+	if cfg.Referer != "" {
+		headers["HTTP-Referer"] = cfg.Referer
+	}
+	if cfg.Title != "" {
+		headers["X-Title"] = cfg.Title
+	}
 	return &Adapter{
-		apiKey:      cfg.APIKey,
-		model:       cfg.Model,
-		baseURL:     strings.TrimRight(base, "/"),
-		referer:     cfg.Referer,
-		title:       cfg.Title,
-		http:        &http.Client{Timeout: 10 * time.Minute},
+		model: cfg.Model,
+		client: openaiwire.Client{
+			HTTP:     &http.Client{Timeout: 10 * time.Minute},
+			BaseURL:  strings.TrimRight(base, "/"),
+			APIKey:   cfg.APIKey,
+			Provider: providerName,
+			Headers:  headers,
+		},
 		meter:       cfg.Meter,
 		temperature: cfg.Temperature,
 		topP:        cfg.TopP,
@@ -112,7 +117,7 @@ func (a *Adapter) Generate(ctx context.Context, msgs []ac.Message, tools []ac.To
 	req := buildRequest(a.model, msgs, tools, cfg, genParams{Temperature: a.temperature, TopP: a.topP}, false)
 
 	start := time.Now()
-	data, err := a.post(ctx, "/chat/completions", req, cfg.APIKey)
+	data, err := a.client.Post(ctx, "/chat/completions", req, cfg.APIKey)
 	if err != nil {
 		return nil, err
 	}
@@ -143,14 +148,14 @@ func (a *Adapter) GenerateStream(ctx context.Context, msgs []ac.Message, tools [
 	if err != nil {
 		return nil, fmt.Errorf("openrouter: encode: %w", err)
 	}
-	httpReq, err := a.newRequest(ctx, "/chat/completions", body, cfg.APIKey)
+	httpReq, err := a.client.NewRequest(ctx, "/chat/completions", body, cfg.APIKey)
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Accept", "text/event-stream")
 
 	start := time.Now()
-	resp, err := a.http.Do(httpReq)
+	resp, err := a.client.HTTP.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("openrouter: request: %w", err)
 	}
@@ -167,50 +172,4 @@ func (a *Adapter) GenerateStream(ctx context.Context, msgs []ac.Message, tools [
 		emitSSE(resp.Body, out, func(u *wireUsage) { a.observe(u, time.Since(start)) })
 	}()
 	return out, nil
-}
-
-// post marshals body, sends it to path and returns the response bytes,
-// failing on a non-200 with the response text. apiKey overrides the adapter
-// key when set (per-call key rotation via WithAPIKey).
-func (a *Adapter) post(ctx context.Context, path string, body any, apiKey string) ([]byte, error) {
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("openrouter: encode: %w", err)
-	}
-	req, err := a.newRequest(ctx, path, raw, apiKey)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := a.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("openrouter: request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("openrouter: %s: %s", resp.Status, strings.TrimSpace(string(data)))
-	}
-	return data, nil
-}
-
-// newRequest builds an authenticated JSON POST with OpenRouter's optional
-// attribution headers. apiKey overrides the adapter's key when non-empty.
-func (a *Adapter) newRequest(ctx context.Context, path string, body []byte, apiKey string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	key := a.apiKey
-	if apiKey != "" {
-		key = apiKey
-	}
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("Content-Type", "application/json")
-	if a.referer != "" {
-		req.Header.Set("HTTP-Referer", a.referer)
-	}
-	if a.title != "" {
-		req.Header.Set("X-Title", a.title)
-	}
-	return req, nil
 }

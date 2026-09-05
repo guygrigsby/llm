@@ -15,7 +15,6 @@
 package kimi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +25,7 @@ import (
 	"time"
 
 	"github.com/guygrigsby/llm"
+	"github.com/guygrigsby/llm/internal/openaiwire"
 	ac "github.com/voocel/agentcore"
 )
 
@@ -49,10 +49,8 @@ type Config struct {
 
 // Adapter wraps Kimi's chat-completions API as an llm.LLM.
 type Adapter struct {
-	apiKey      string
 	model       string
-	baseURL     string
-	http        *http.Client
+	client      openaiwire.Client
 	meter       llm.Meter
 	temperature *float64
 	topP        *float64
@@ -74,10 +72,13 @@ func New(cfg Config) (*Adapter, error) {
 		base = defaultBaseURL
 	}
 	return &Adapter{
-		apiKey:      cfg.APIKey,
-		model:       cfg.Model,
-		baseURL:     strings.TrimRight(base, "/"),
-		http:        &http.Client{Timeout: 5 * time.Minute},
+		model: cfg.Model,
+		client: openaiwire.Client{
+			HTTP:     &http.Client{Timeout: 5 * time.Minute},
+			BaseURL:  strings.TrimRight(base, "/"),
+			APIKey:   cfg.APIKey,
+			Provider: providerName,
+		},
 		meter:       cfg.Meter,
 		temperature: cfg.Temperature,
 		topP:        cfg.TopP,
@@ -104,7 +105,7 @@ func (a *Adapter) Generate(ctx context.Context, msgs []ac.Message, tools []ac.To
 	req := buildRequest(a.model, msgs, tools, cfg, genParams{Temperature: a.temperature, TopP: a.topP}, false)
 
 	start := time.Now()
-	data, err := a.post(ctx, "/chat/completions", req, cfg.APIKey)
+	data, err := a.client.Post(ctx, "/chat/completions", req, cfg.APIKey)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +126,7 @@ func (a *Adapter) Generate(ctx context.Context, msgs []ac.Message, tools []ac.To
 // GenerateStream runs a streaming chat completion, emitting the agentcore
 // StreamEvent sequence the loop expects: thinking/text start-delta-end,
 // tool-call start/delta/end with the completed call, a terminal done event
-// carrying the fully assembled message + stop reason, and an error event on
+// carrying the fully assembled message + stop reason and an error event on
 // failure. reasoning_content deltas become thinking events.
 func (a *Adapter) GenerateStream(ctx context.Context, msgs []ac.Message, tools []ac.ToolSpec, opts ...ac.CallOption) (<-chan ac.StreamEvent, error) {
 	cfg := ac.ResolveCallConfig(opts)
@@ -135,14 +136,14 @@ func (a *Adapter) GenerateStream(ctx context.Context, msgs []ac.Message, tools [
 	if err != nil {
 		return nil, fmt.Errorf("kimi: encode: %w", err)
 	}
-	httpReq, err := a.newRequest(ctx, "/chat/completions", body, cfg.APIKey)
+	httpReq, err := a.client.NewRequest(ctx, "/chat/completions", body, cfg.APIKey)
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Accept", "text/event-stream")
 
 	start := time.Now()
-	resp, err := a.http.Do(httpReq)
+	resp, err := a.client.HTTP.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("kimi: request: %w", err)
 	}
@@ -170,7 +171,7 @@ func (a *Adapter) EstimateTokens(ctx context.Context, msgs []ac.Message) (int, e
 		Messages []wireMessage `json:"messages"`
 	}{Model: a.model, Messages: convertMessages(msgs)}
 
-	data, err := a.post(ctx, "/tokenizers/estimate-token-count", req, "")
+	data, err := a.client.Post(ctx, "/tokenizers/estimate-token-count", req, "")
 	if err != nil {
 		return 0, err
 	}
@@ -189,44 +190,4 @@ func (a *Adapter) EstimateTokens(ctx context.Context, msgs []ac.Message) (int, e
 		return 0, fmt.Errorf("kimi: %s", er.Error.Message)
 	}
 	return er.Data.TotalTokens, nil
-}
-
-// post marshals body, sends it to path, and returns the response bytes, failing
-// on a non-200 with the response text. apiKey overrides the adapter key when set
-// (per-call key rotation via WithAPIKey).
-func (a *Adapter) post(ctx context.Context, path string, body any, apiKey string) ([]byte, error) {
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("kimi: encode: %w", err)
-	}
-	req, err := a.newRequest(ctx, path, raw, apiKey)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := a.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("kimi: request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("kimi: %s: %s", resp.Status, strings.TrimSpace(string(data)))
-	}
-	return data, nil
-}
-
-// newRequest builds an authenticated JSON POST. apiKey overrides the adapter's
-// key when non-empty.
-func (a *Adapter) newRequest(ctx context.Context, path string, body []byte, apiKey string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	key := a.apiKey
-	if apiKey != "" {
-		key = apiKey
-	}
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("Content-Type", "application/json")
-	return req, nil
 }

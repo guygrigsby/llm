@@ -22,8 +22,8 @@ func TestNewValidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.baseURL != "https://openrouter.ai/api/v1" {
-		t.Errorf("baseURL = %q", a.baseURL)
+	if a.client.BaseURL != "https://openrouter.ai/api/v1" {
+		t.Errorf("baseURL = %q", a.client.BaseURL)
 	}
 	if a.ProviderName() != "openrouter" || !a.SupportsTools() {
 		t.Error("provider name or tools flag wrong")
