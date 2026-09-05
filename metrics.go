@@ -20,6 +20,10 @@ type Usage struct {
 	// three are additive: total input = PromptTokens + CacheReadTokens + CacheWriteTokens.
 	CacheReadTokens  int `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+	// Cost is the provider-reported cost of the call in USD credits, for
+	// providers that price per call (OpenRouter). Zero when not reported; a
+	// Meter that prices from tokens ignores it.
+	Cost float64 `json:"cost,omitempty"`
 }
 
 // Meter observes per-call Usage. Set one on an adapter's Config to capture
