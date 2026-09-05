@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/guygrigsby/llm"
 	ac "github.com/voocel/agentcore"
 )
 
@@ -245,4 +246,33 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func TestGenerateMeters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150,"cost":0.00042,"prompt_tokens_details":{"cached_tokens":100},"completion_tokens_details":{"reasoning_tokens":10}}}`))
+	}))
+	defer srv.Close()
+
+	var got llm.Usage
+	a, _ := New(Config{APIKey: "k", Model: "moonshotai/kimi-k3", BaseURL: srv.URL, Meter: llm.MeterFunc(func(u llm.Usage) { got = u })})
+	resp, err := a.Generate(context.Background(), []ac.Message{ac.UserMsg("q")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Provider != "openrouter" || got.Model != "moonshotai/kimi-k3" {
+		t.Errorf("identity = %+v", got)
+	}
+	if got.PromptTokens != 20 || got.CacheReadTokens != 100 || got.CompletionTokens != 30 || got.TotalTokens != 150 {
+		t.Errorf("tokens = %+v", got)
+	}
+	if got.Cost != 0.00042 {
+		t.Errorf("cost = %v", got.Cost)
+	}
+	if got.Latency <= 0 {
+		t.Error("latency not recorded")
+	}
+	if resp.Message.Usage == nil || resp.Message.Usage.Input != 120 || resp.Message.Usage.CacheRead != 100 {
+		t.Errorf("agent usage = %+v", resp.Message.Usage)
+	}
 }
