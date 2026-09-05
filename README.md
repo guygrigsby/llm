@@ -112,6 +112,26 @@ if err != nil {
 agent := jess.New(jess.WithModel(m) /* , ... */)
 ```
 
+### openrouter
+
+`github.com/guygrigsby/llm/openrouter`, a native OpenRouter adapter over its
+OpenAI-format chat-completions API, using only `net/http` (no SDK dependency).
+One key, any OpenRouter model id per adapter (`moonshotai/kimi-k3`,
+`anthropic/claude-opus-5`, ...). Full scope: SSE token streaming and tool
+calling. OpenRouter extensions are wired: the `reasoning` request object
+(effort mapped from the call's thinking level, the model's reasoning surfaced as
+a thinking block, and `reasoning_details` echoed back on assistant messages so
+the model keeps its chain of thought across tool calls), and usage accounting
+with `cost` and cached prompt tokens reaching the `Meter`.
+
+```go
+m, err := openrouter.New(openrouter.Config{APIKey: key, Model: "moonshotai/kimi-k3", Title: "my-app"})
+if err != nil {
+	return err
+}
+agent := jess.New(jess.WithModel(m) /* , ... */)
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
