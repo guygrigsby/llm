@@ -133,8 +133,8 @@ func (a *Adapter) Generate(ctx context.Context, msgs []ac.Message, tools []ac.To
 // GenerateStream runs a streaming chat completion, emitting the agentcore
 // StreamEvent sequence the loop expects: thinking/text start-delta-end,
 // tool-call start/delta/end with the completed call, a terminal done event
-// carrying the fully assembled message and stop reason, and an error event on
-// failure.
+// carrying the fully assembled message with its stop reason and an error
+// event on failure.
 func (a *Adapter) GenerateStream(ctx context.Context, msgs []ac.Message, tools []ac.ToolSpec, opts ...ac.CallOption) (<-chan ac.StreamEvent, error) {
 	cfg := ac.ResolveCallConfig(opts)
 	req := buildRequest(a.model, msgs, tools, cfg, genParams{Temperature: a.temperature, TopP: a.topP}, true)
@@ -169,7 +169,7 @@ func (a *Adapter) GenerateStream(ctx context.Context, msgs []ac.Message, tools [
 	return out, nil
 }
 
-// post marshals body, sends it to path, and returns the response bytes,
+// post marshals body, sends it to path and returns the response bytes,
 // failing on a non-200 with the response text. apiKey overrides the adapter
 // key when set (per-call key rotation via WithAPIKey).
 func (a *Adapter) post(ctx context.Context, path string, body any, apiKey string) ([]byte, error) {

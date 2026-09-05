@@ -275,4 +275,7 @@ func TestGenerateMeters(t *testing.T) {
 	if resp.Message.Usage == nil || resp.Message.Usage.Input != 120 || resp.Message.Usage.CacheRead != 100 {
 		t.Errorf("agent usage = %+v", resp.Message.Usage)
 	}
+	if resp.Message.Usage.Cost == nil || resp.Message.Usage.Cost.Total != 0.00042 {
+		t.Errorf("agent usage cost = %+v", resp.Message.Usage.Cost)
+	}
 }

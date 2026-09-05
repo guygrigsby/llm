@@ -272,6 +272,9 @@ func mapStopReason(reason string) ac.StopReason {
 
 // toAgentUsage maps wire usage to agentcore Usage (Input keeps the OpenAI
 // convention of including cached tokens). nil when nothing was reported.
+// Cost only carries a Total: OpenRouter reports one call-level cost, not a
+// per-token-class breakdown, so Input/Output/CacheRead/CacheWrite on ac.Cost
+// stay zero rather than claim a precision the wire data doesn't have.
 func toAgentUsage(u *wireUsage) *ac.Usage {
 	if u == nil || (u.PromptTokens == 0 && u.CompletionTokens == 0) {
 		return nil
@@ -281,6 +284,7 @@ func toAgentUsage(u *wireUsage) *ac.Usage {
 		Output:      u.CompletionTokens,
 		CacheRead:   u.PromptTokensDetails.CachedTokens,
 		TotalTokens: u.TotalTokens,
+		Cost:        &ac.Cost{Total: u.Cost},
 	}
 }
 
