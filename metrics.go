@@ -20,6 +20,12 @@ type Usage struct {
 	// three are additive: total input = PromptTokens + CacheReadTokens + CacheWriteTokens.
 	CacheReadTokens  int `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+	// ReasoningTokens is the part of CompletionTokens the model spent on
+	// reasoning, for providers that break it out (OpenRouter's
+	// completion_tokens_details.reasoning_tokens). It is a subset of
+	// CompletionTokens, not an addition, so a Meter must not add it to the
+	// total. Zero when the provider reports no split.
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 	// Cost is the provider-reported cost of the call in USD credits, for
 	// providers that price per call (OpenRouter). Zero when not reported; a
 	// Meter that prices from tokens ignores it.

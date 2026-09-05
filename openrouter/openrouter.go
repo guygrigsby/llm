@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -32,6 +31,11 @@ import (
 // defaultBaseURL is OpenRouter's public endpoint. /api/v1 is part of the base,
 // so the chat path is baseURL + "/chat/completions".
 const defaultBaseURL = "https://openrouter.ai/api/v1"
+
+// defaultStreamIdle is how long a stream may produce nothing before the
+// adapter gives up on it. Long thinking pauses are normal, a two minute
+// silence is a stuck connection.
+const defaultStreamIdle = 2 * time.Minute
 
 // Config configures the adapter. APIKey and Model are required; Model is an
 // OpenRouter model id such as "moonshotai/kimi-k3". BaseURL defaults to
@@ -49,6 +53,12 @@ type Config struct {
 	// wire (the model's own default).
 	Temperature *float64
 	TopP        *float64
+	// StreamIdleTimeout aborts a stream that has produced nothing for this
+	// long, surfacing agentcore.ErrProviderStreamIdle so the agent loop can
+	// fail over instead of waiting on a dead connection. Zero uses two
+	// minutes; negative disables the watchdog. Streaming has no overall
+	// deadline: a legitimately long generation must not be cut off.
+	StreamIdleTimeout time.Duration
 }
 
 // Adapter wraps OpenRouter's chat-completions API as an llm.LLM.
@@ -82,14 +92,23 @@ func New(cfg Config) (*Adapter, error) {
 	if cfg.Title != "" {
 		headers["X-Title"] = cfg.Title
 	}
+	idle := cfg.StreamIdleTimeout
+	if idle == 0 {
+		idle = defaultStreamIdle
+	}
 	return &Adapter{
 		model: cfg.Model,
 		client: openaiwire.Client{
-			HTTP:     &http.Client{Timeout: 10 * time.Minute},
-			BaseURL:  strings.TrimRight(base, "/"),
-			APIKey:   cfg.APIKey,
-			Provider: providerName,
-			Headers:  headers,
+			HTTP: &http.Client{Timeout: 10 * time.Minute},
+			// Streaming gets its own client with no overall timeout: the idle
+			// watchdog catches a stalled stream in seconds, where a deadline
+			// either fires ten minutes late or kills a long healthy one.
+			StreamHTTP: &http.Client{},
+			StreamIdle: idle,
+			BaseURL:    strings.TrimRight(base, "/"),
+			APIKey:     cfg.APIKey,
+			Provider:   providerName,
+			Headers:    headers,
 		},
 		meter:       cfg.Meter,
 		temperature: cfg.Temperature,
@@ -125,13 +144,15 @@ func (a *Adapter) Generate(ctx context.Context, msgs []ac.Message, tools []ac.To
 	if err := json.Unmarshal(data, &cr); err != nil {
 		return nil, fmt.Errorf("openrouter: decode: %w", err)
 	}
+	// Meter first: a response that carries an error or no choices was still
+	// billed for whatever it consumed, and that cost belongs in the Meter.
+	a.observe(cr.Usage, time.Since(start))
 	if cr.Error != nil {
 		return nil, fmt.Errorf("openrouter: %d: %s", cr.Error.Code, cr.Error.Message)
 	}
 	if len(cr.Choices) == 0 {
 		return nil, errors.New("openrouter: response had no choices")
 	}
-	a.observe(cr.Usage, time.Since(start))
 	return &ac.LLMResponse{Message: convertResponse(&cr)}, nil
 }
 
@@ -148,28 +169,17 @@ func (a *Adapter) GenerateStream(ctx context.Context, msgs []ac.Message, tools [
 	if err != nil {
 		return nil, fmt.Errorf("openrouter: encode: %w", err)
 	}
-	httpReq, err := a.client.NewRequest(ctx, "/chat/completions", body, cfg.APIKey)
+	start := time.Now()
+	sse, err := a.client.Stream(ctx, "/chat/completions", body, cfg.APIKey)
 	if err != nil {
 		return nil, err
-	}
-	httpReq.Header.Set("Accept", "text/event-stream")
-
-	start := time.Now()
-	resp, err := a.client.HTTP.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("openrouter: request: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		defer func() { _ = resp.Body.Close() }()
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("openrouter: %s: %s", resp.Status, strings.TrimSpace(string(msg)))
 	}
 
 	out := make(chan ac.StreamEvent, 64)
 	go func() {
 		defer close(out)
-		defer func() { _ = resp.Body.Close() }()
-		emitSSE(resp.Body, out, func(u *wireUsage) { a.observe(u, time.Since(start)) })
+		defer func() { _ = sse.Close() }()
+		emitSSE(ctx, sse, out, func(u *wireUsage) { a.observe(u, time.Since(start)) })
 	}()
 	return out, nil
 }

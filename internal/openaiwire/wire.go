@@ -13,18 +13,25 @@ package openaiwire
 // fields, so Messages can carry provider extensions without this package
 // knowing them. An adapter that needs a different wire name for a shared
 // field (kimi sends max_completion_tokens, openrouter sends max_tokens)
-// redeclares that field in its own request struct: the redeclaration shadows
-// the promoted one for both Go field access and JSON encoding, so only the
-// adapter's own tag reaches the wire.
+// redeclares that field in its own request struct. The redeclaration shadows
+// the promoted one for Go field access only: encoding/json keys on the JSON
+// name, so a differently tagged promoted field is still a candidate. It works
+// because nothing ever assigns the promoted field, and its omitempty keeps
+// the zero value off the wire, leaving only the adapter's own tag.
 type Request[M any] struct {
-	Model       string   `json:"model"`
-	Messages    []M      `json:"messages"`
-	Tools       []Tool   `json:"tools,omitempty"`
-	ToolChoice  any      `json:"tool_choice,omitempty"`
-	Stream      bool     `json:"stream"`
-	MaxTokens   int      `json:"max_completion_tokens,omitempty"`
-	Temperature *float64 `json:"temperature,omitempty"`
-	TopP        *float64 `json:"top_p,omitempty"`
+	Model      string `json:"model"`
+	Messages   []M    `json:"messages"`
+	Tools      []Tool `json:"tools,omitempty"`
+	ToolChoice any    `json:"tool_choice,omitempty"`
+	// ResponseFormat carries agentcore's per-call response format through as
+	// is: *agentcore.ResponseFormat already marshals to the OpenAI shape.
+	// Leave it nil to keep it off the wire; a typed nil pointer would encode
+	// as a JSON null and some providers reject that.
+	ResponseFormat any      `json:"response_format,omitempty"`
+	Stream         bool     `json:"stream"`
+	MaxTokens      int      `json:"max_completion_tokens,omitempty"`
+	Temperature    *float64 `json:"temperature,omitempty"`
+	TopP           *float64 `json:"top_p,omitempty"`
 }
 
 // Message is the OpenAI-format chat message shape common to every adapter: a

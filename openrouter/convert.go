@@ -19,9 +19,10 @@ const providerName = "openrouter"
 // wire request -------------------------------------------------------------
 
 // chatRequest embeds the shared request shape and adds OpenRouter's own
-// max_tokens (openaiwire.Request tags this max_completion_tokens for kimi;
-// redeclaring the field here shadows that promoted one, so only "max_tokens"
-// reaches the wire) and reasoning object.
+// max_tokens and reasoning object. openaiwire.Request tags its own max-tokens
+// field max_completion_tokens for kimi; redeclaring MaxTokens here shadows
+// that promoted field for Go access, so it is never assigned and its
+// omitempty keeps it off the wire, leaving only "max_tokens".
 type chatRequest struct {
 	openaiwire.Request[wireMessage]
 	MaxTokens int             `json:"max_tokens,omitempty"`
@@ -106,6 +107,11 @@ func buildRequest(model string, msgs []ac.Message, tools []ac.ToolSpec, cfg ac.C
 		},
 		MaxTokens: cfg.MaxTokens,
 	}
+	// Only set the field when there is a format: a typed nil pointer in the
+	// any field would reach the wire as a JSON null.
+	if cfg.ResponseFormat != nil {
+		req.ResponseFormat = cfg.ResponseFormat
+	}
 	if effort := reasoningEffort(cfg.ThinkingLevel); effort != "" {
 		req.Reasoning = &reasoningParam{Effort: effort}
 	}
@@ -130,7 +136,7 @@ func assistantMessage(m ac.Message) wireMessage {
 		Content:   m.TextContent(),
 		ToolCalls: openaiwire.ToolCallsFrom(m),
 	}}
-	if d, ok := m.Metadata["reasoning_details"].(json.RawMessage); ok && len(d) > 0 {
+	if d := reasoningDetailsJSON(m.Metadata["reasoning_details"]); len(d) > 0 {
 		wm.ReasoningDetails = d
 	} else if r := m.ThinkingContent(); r != "" {
 		wm.Reasoning = r
@@ -138,10 +144,45 @@ func assistantMessage(m ac.Message) wireMessage {
 	return wm
 }
 
+// reasoningDetailsJSON renders a reasoning_details metadata value as raw JSON.
+// The adapter stores json.RawMessage, but history that has been through a JSON
+// round-trip (persisted, handed to a sub-agent) comes back as []any, so an
+// exact type assertion silently drops the echo and costs the model its chain
+// of thought. Raw forms pass through and anything else is marshaled. A value
+// that is not usable JSON is dropped so the plaintext reasoning fallback runs,
+// rather than poisoning the request body.
+func reasoningDetailsJSON(v any) json.RawMessage {
+	var raw json.RawMessage
+	switch d := v.(type) {
+	case nil:
+		return nil
+	case json.RawMessage:
+		raw = d
+	case []byte:
+		raw = d
+	case string:
+		raw = json.RawMessage(d)
+	default:
+		b, err := json.Marshal(d)
+		if err != nil {
+			return nil
+		}
+		raw = b
+	}
+	if len(raw) == 0 || string(raw) == "null" || !json.Valid(raw) {
+		return nil
+	}
+	return raw
+}
+
 // reasoningEffort maps an agentcore thinking level to OpenRouter's effort
-// enum. Off and unspecified return "" so the reasoning object is omitted.
+// enum. Off maps to "none", which actually turns reasoning off on a reasoning
+// model; only an unspecified level returns "" so the reasoning object is
+// omitted and the model keeps its own default.
 func reasoningEffort(level ac.ThinkingLevel) string {
 	switch level {
+	case ac.ThinkingOff:
+		return "none"
 	case ac.ThinkingMinimal:
 		return "minimal"
 	case ac.ThinkingLow:
@@ -206,6 +247,7 @@ func toLLMUsage(model string, u *wireUsage, latency time.Duration) llm.Usage {
 		TotalTokens:      u.TotalTokens,
 		Latency:          latency,
 		CacheReadTokens:  cached,
+		ReasoningTokens:  u.CompletionTokensDetails.ReasoningTokens,
 		Cost:             u.Cost,
 	}
 }

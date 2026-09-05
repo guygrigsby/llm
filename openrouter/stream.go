@@ -1,6 +1,7 @@
 package openrouter
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,19 +37,31 @@ type chatChunk struct {
 // A read error (other than clean EOF) or an error chunk becomes a terminal
 // error event, and skips the terminal done event (there is nothing complete
 // to report).
-func emitSSE(r io.Reader, out chan<- ac.StreamEvent, onUsage func(*wireUsage)) {
-	em := openaiwire.NewEmitter(out)
+//
+// A body that just ends, with no "[DONE]" frame and no finish_reason, is a
+// truncated response: the done event and the tool-call-end events are skipped
+// so the agent loop raises its own PartialStreamError and retries the turn,
+// instead of persisting a half message with cut-off tool-call arguments.
+//
+// ctx is the request context. Every send is guarded by it, so a consumer that
+// stops reading releases this goroutine and the HTTP body rather than pinning
+// both for the life of the process.
+func emitSSE(ctx context.Context, r io.Reader, out chan<- ac.StreamEvent, onUsage func(*wireUsage)) {
+	em := openaiwire.NewEmitter(ctx, out)
 	var usage *wireUsage
 	var details []json.RawMessage
 	aborted := false
 
-	err := openaiwire.ReadSSE(r, func(data string) (bool, error) {
+	done, err := openaiwire.ReadSSE(r, func(data string) (bool, error) {
 		var chunk chatChunk
 		if json.Unmarshal([]byte(data), &chunk) != nil {
 			return false, nil
 		}
 		if chunk.Error != nil {
-			out <- ac.StreamEvent{Type: ac.StreamEventError, Err: fmt.Errorf("openrouter: %d: %s", chunk.Error.Code, chunk.Error.Message)}
+			// Any thinking or text block still open is left unclosed on
+			// purpose: the agent loop discards the partial message when it
+			// sees an error event, so closing frames would be noise.
+			openaiwire.Send(ctx, out, ac.StreamEvent{Type: ac.StreamEventError, Err: fmt.Errorf("openrouter: %d: %s", chunk.Error.Code, chunk.Error.Message)})
 			aborted = true
 			return true, nil
 		}
@@ -59,13 +72,23 @@ func emitSSE(r io.Reader, out chan<- ac.StreamEvent, onUsage func(*wireUsage)) {
 			handleReasoningDetails(em, ch.Delta.Reasoning, ch.Delta.ReasoningDetails, &details)
 			em.Handle(openaiwire.Delta{Content: ch.Delta.Content, ToolCalls: ch.Delta.ToolCalls}, ch.FinishReason)
 		}
-		return false, nil
+		return em.Aborted(), nil
 	})
 	if err != nil {
-		out <- ac.StreamEvent{Type: ac.StreamEventError, Err: fmt.Errorf("openrouter: stream: %w", err)}
+		reportUsage(usage, onUsage)
+		openaiwire.Send(ctx, out, ac.StreamEvent{Type: ac.StreamEventError, Err: fmt.Errorf("openrouter: stream: %w", err)})
 		return
 	}
 	if aborted {
+		// The turn failed, but the tokens it burned were billed: report them.
+		reportUsage(usage, onUsage)
+		return
+	}
+	if em.Aborted() {
+		return
+	}
+	if !done && em.Finish() == "" {
+		reportUsage(usage, onUsage)
 		return
 	}
 
@@ -78,11 +101,21 @@ func emitSSE(r io.Reader, out chan<- ac.StreamEvent, onUsage func(*wireUsage)) {
 		}
 		return msg
 	})
-	if usage != nil && onUsage != nil {
-		onUsage(usage)
-	}
+	reportUsage(usage, onUsage)
 	final.Usage = toAgentUsage(usage)
-	out <- ac.StreamEvent{Type: ac.StreamEventDone, Message: final, StopReason: final.StopReason}
+	if em.Aborted() {
+		return
+	}
+	openaiwire.Send(ctx, out, ac.StreamEvent{Type: ac.StreamEventDone, Message: final, StopReason: final.StopReason})
+}
+
+// reportUsage hands whatever usage arrived to the meter. Every path out of
+// emitSSE calls it, complete turn or not: the provider billed for the tokens
+// either way, and a cost that never reaches the Meter is a cost nobody sees.
+func reportUsage(u *wireUsage, onUsage func(*wireUsage)) {
+	if u != nil && onUsage != nil {
+		onUsage(u)
+	}
 }
 
 // handleReasoningDetails feeds a chunk's plaintext reasoning to the emitter

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/guygrigsby/llm"
@@ -196,7 +197,7 @@ func TestGenerateHTTPError(t *testing.T) {
 
 	a, _ := New(Config{APIKey: "k", Model: "m", BaseURL: srv.URL})
 	_, err := a.Generate(context.Background(), []ac.Message{ac.UserMsg("q")}, nil)
-	if err == nil || !contains(err.Error(), "insufficient credits") {
+	if err == nil || !strings.Contains(err.Error(), "insufficient credits") {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -209,7 +210,7 @@ func TestGenerateBodyError(t *testing.T) {
 
 	a, _ := New(Config{APIKey: "k", Model: "m", BaseURL: srv.URL})
 	_, err := a.Generate(context.Background(), []ac.Message{ac.UserMsg("q")}, nil)
-	if err == nil || !contains(err.Error(), "model not found") {
+	if err == nil || !strings.Contains(err.Error(), "model not found") {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -235,19 +236,6 @@ func TestSamplerParamsSent(t *testing.T) {
 	}
 }
 
-func contains(s, sub string) bool {
-	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
-}
-
 func TestGenerateMeters(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150,"cost":0.00042,"prompt_tokens_details":{"cached_tokens":100},"completion_tokens_details":{"reasoning_tokens":10}}}`))
@@ -266,6 +254,9 @@ func TestGenerateMeters(t *testing.T) {
 	if got.PromptTokens != 20 || got.CacheReadTokens != 100 || got.CompletionTokens != 30 || got.TotalTokens != 150 {
 		t.Errorf("tokens = %+v", got)
 	}
+	if got.ReasoningTokens != 10 {
+		t.Errorf("reasoning tokens = %d, want 10", got.ReasoningTokens)
+	}
 	if got.Cost != 0.00042 {
 		t.Errorf("cost = %v", got.Cost)
 	}
@@ -277,5 +268,100 @@ func TestGenerateMeters(t *testing.T) {
 	}
 	if resp.Message.Usage.Cost == nil || resp.Message.Usage.Cost.Total != 0.00042 {
 		t.Errorf("agent usage cost = %+v", resp.Message.Usage.Cost)
+	}
+}
+
+// TestReasoningDetailsEchoedAfterRoundTrip proves the reasoning_details echo
+// survives a JSON round-trip of history: agentcore metadata that has been
+// marshalled and unmarshalled comes back as []any, not json.RawMessage.
+func TestReasoningDetailsEchoedAfterRoundTrip(t *testing.T) {
+	var body chatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"done"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	var roundTripped any
+	if err := json.Unmarshal([]byte(`[{"type":"reasoning.encrypted","data":"xyz"}]`), &roundTripped); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := roundTripped.([]any); !ok {
+		t.Fatalf("fixture is %T, want []any", roundTripped)
+	}
+
+	a, _ := New(Config{APIKey: "k", Model: "m", BaseURL: srv.URL})
+	prior := ac.Message{
+		Role:     ac.RoleAssistant,
+		Content:  []ac.ContentBlock{ac.ThinkingBlock("thought")},
+		Metadata: map[string]any{"reasoning_details": roundTripped},
+	}
+	if _, err := a.Generate(context.Background(), []ac.Message{ac.UserMsg("q"), prior}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if string(body.Messages[1].ReasoningDetails) != `[{"data":"xyz","type":"reasoning.encrypted"}]` {
+		t.Errorf("reasoning_details = %s, want the round-tripped echo", body.Messages[1].ReasoningDetails)
+	}
+	if body.Messages[1].Reasoning != "" {
+		t.Errorf("plaintext reasoning must not be sent when details are present, got %q", body.Messages[1].Reasoning)
+	}
+}
+
+// TestReasoningEffortOff proves ThinkingOff maps to OpenRouter's "none", which
+// actually disables reasoning; only an unspecified level omits the object.
+func TestReasoningEffortOff(t *testing.T) {
+	if got := reasoningEffort(ac.ThinkingOff); got != "none" {
+		t.Errorf("reasoningEffort(off) = %q, want none", got)
+	}
+	if got := reasoningEffort(""); got != "" {
+		t.Errorf("reasoningEffort(unspecified) = %q, want empty", got)
+	}
+}
+
+// TestResponseFormatSent proves a call's response format reaches the wire.
+func TestResponseFormatSent(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	a, _ := New(Config{APIKey: "k", Model: "m", BaseURL: srv.URL})
+	if _, err := a.Generate(context.Background(), []ac.Message{ac.UserMsg("q")}, nil, ac.WithJSONMode()); err != nil {
+		t.Fatal(err)
+	}
+	rf, ok := body["response_format"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_format on wire = %#v", body["response_format"])
+	}
+	if rf["type"] != "json_object" {
+		t.Errorf("response_format = %#v, want type json_object", rf)
+	}
+
+	body = nil
+	if _, err := a.Generate(context.Background(), []ac.Message{ac.UserMsg("q")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := body["response_format"]; present {
+		t.Errorf("response_format must be omitted when unset, got %#v", body["response_format"])
+	}
+}
+
+// TestGenerateObservesUsageOnErrorResponse proves billed usage on an errored
+// response still reaches the Meter: the provider charged for the call.
+func TestGenerateObservesUsageOnErrorResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"error":{"code":502,"message":"upstream failed"},"usage":{"prompt_tokens":11,"completion_tokens":0,"total_tokens":11,"cost":0.0003}}`))
+	}))
+	defer srv.Close()
+
+	var metered llm.Usage
+	a, _ := New(Config{APIKey: "k", Model: "m", BaseURL: srv.URL, Meter: llm.MeterFunc(func(u llm.Usage) { metered = u })})
+	if _, err := a.Generate(context.Background(), []ac.Message{ac.UserMsg("q")}, nil); err == nil {
+		t.Fatal("expected an error")
+	}
+	if metered.TotalTokens != 11 {
+		t.Errorf("usage not metered on an errored response: %+v", metered)
 	}
 }

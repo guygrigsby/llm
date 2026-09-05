@@ -1,6 +1,7 @@
 package kimi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,11 +32,20 @@ type chatChunk struct {
 // emitSSE reads the SSE body to completion, emitting agentcore stream events
 // via a shared openaiwire.Emitter and reporting usage once through onUsage. A
 // read error (other than clean EOF) becomes a terminal error event.
-func emitSSE(r io.Reader, out chan<- ac.StreamEvent, onUsage func(*wireUsage)) {
-	em := openaiwire.NewEmitter(out)
+//
+// A body that just ends, with no "[DONE]" frame and no finish_reason, is a
+// truncated response: the done event and the tool-call-end events are skipped
+// so the agent loop raises its own PartialStreamError and retries the turn,
+// instead of persisting a half message with cut-off tool-call arguments.
+//
+// ctx is the request context. Every send is guarded by it, so a consumer that
+// stops reading releases this goroutine and the HTTP body rather than pinning
+// both for the life of the process.
+func emitSSE(ctx context.Context, r io.Reader, out chan<- ac.StreamEvent, onUsage func(*wireUsage)) {
+	em := openaiwire.NewEmitter(ctx, out)
 	var usage *wireUsage
 
-	err := openaiwire.ReadSSE(r, func(data string) (bool, error) {
+	done, err := openaiwire.ReadSSE(r, func(data string) (bool, error) {
 		var chunk chatChunk
 		if json.Unmarshal([]byte(data), &chunk) != nil {
 			return false, nil
@@ -50,19 +60,37 @@ func emitSSE(r io.Reader, out chan<- ac.StreamEvent, onUsage func(*wireUsage)) {
 				ToolCalls: ch.Delta.ToolCalls,
 			}, ch.FinishReason)
 		}
-		return false, nil
+		return em.Aborted(), nil
 	})
 	if err != nil {
-		out <- ac.StreamEvent{Type: ac.StreamEventError, Err: fmt.Errorf("kimi: stream: %w", err)}
+		reportUsage(usage, onUsage)
+		openaiwire.Send(ctx, out, ac.StreamEvent{Type: ac.StreamEventError, Err: fmt.Errorf("kimi: stream: %w", err)})
+		return
+	}
+	if em.Aborted() {
+		return
+	}
+	if !done && em.Finish() == "" {
+		reportUsage(usage, onUsage)
 		return
 	}
 
 	final := em.Flush(func(reasoning, content string, calls []openaiwire.ToolCall, finish string) ac.Message {
 		return openaiwire.AssembleMessage(reasoning, content, calls, finish)
 	})
-	if usage != nil && onUsage != nil {
-		onUsage(usage)
-	}
+	reportUsage(usage, onUsage)
 	final.Usage = toAgentUsage(usage)
-	out <- ac.StreamEvent{Type: ac.StreamEventDone, Message: final, StopReason: final.StopReason}
+	if em.Aborted() {
+		return
+	}
+	openaiwire.Send(ctx, out, ac.StreamEvent{Type: ac.StreamEventDone, Message: final, StopReason: final.StopReason})
+}
+
+// reportUsage hands whatever usage arrived to the meter. Every path out of
+// emitSSE calls it, complete turn or not: the provider billed for the tokens
+// either way, and a cost that never reaches the Meter is a cost nobody sees.
+func reportUsage(u *wireUsage, onUsage func(*wireUsage)) {
+	if u != nil && onUsage != nil {
+		onUsage(u)
+	}
 }

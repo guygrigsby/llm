@@ -1,7 +1,9 @@
 package openaiwire
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	ac "github.com/voocel/agentcore"
 )
@@ -11,7 +13,7 @@ import (
 // the emitted event sequence and the flushed terminal message.
 func TestEmitterSequence(t *testing.T) {
 	out := make(chan ac.StreamEvent, 64)
-	em := NewEmitter(out)
+	em := NewEmitter(context.Background(), out)
 
 	em.Handle(Delta{Reasoning: "hmm"}, "")
 	em.Handle(Delta{Content: "hel"}, "")
@@ -74,4 +76,28 @@ func eventTypes(evs []ac.StreamEvent) []ac.StreamEventType {
 		out[i] = e.Type
 	}
 	return out
+}
+
+// TestEmitterAbortsOnContextCancel proves a send that no consumer is reading
+// releases when the request context is cancelled, so the producer goroutine
+// (and the HTTP body it holds) cannot be pinned by a stalled consumer.
+func TestEmitterAbortsOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	out := make(chan ac.StreamEvent) // unbuffered: nobody reads
+	em := NewEmitter(ctx, out)
+
+	returned := make(chan struct{})
+	go func() {
+		em.Handle(Delta{Content: "hi"}, "")
+		close(returned)
+	}()
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Handle did not return after the context was cancelled")
+	}
+	if !em.Aborted() {
+		t.Error("emitter not marked aborted after cancel")
+	}
 }

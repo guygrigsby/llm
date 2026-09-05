@@ -2,6 +2,7 @@ package openaiwire
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"strings"
 
@@ -20,27 +21,32 @@ import (
 // "[DONE]" or when onData reports stop=true, and returns any error onData
 // reports or any read error other than a clean EOF (an SSE body ends without
 // a trailing frame, so that is not itself an error).
-func ReadSSE(r io.Reader, onData func(data string) (stop bool, err error)) error {
+//
+// done reports whether the stream terminated on an explicit "[DONE]" frame.
+// A false done with a nil error means the body simply ended: the response may
+// be truncated mid message, so the caller must not treat what it accumulated
+// as a complete turn unless a finish_reason arrived.
+func ReadSSE(r io.Reader, onData func(data string) (stop bool, err error)) (done bool, err error) {
 	br := bufio.NewReader(r)
 	for {
-		line, err := br.ReadString('\n')
+		line, readErr := br.ReadString('\n')
 		if data, ok := sseData(line); ok {
 			if data == "[DONE]" {
-				return nil
+				return true, nil
 			}
 			stop, onErr := onData(data)
 			if onErr != nil {
-				return onErr
+				return false, onErr
 			}
 			if stop {
-				return nil
+				return false, nil
 			}
 		}
-		if err != nil {
-			if err != io.EOF {
-				return err
+		if readErr != nil {
+			if readErr != io.EOF {
+				return false, readErr
 			}
-			return nil
+			return false, nil
 		}
 	}
 }
@@ -55,6 +61,19 @@ func sseData(line string) (string, bool) {
 	return strings.TrimSpace(line[len("data:"):]), true
 }
 
+// Send delivers ev on out unless ctx is already done, reporting whether the
+// send happened. Every producer send goes through this: a consumer that stops
+// reading must not pin the producer goroutine or the HTTP body it holds for
+// the life of the process.
+func Send(ctx context.Context, out chan<- ac.StreamEvent, ev ac.StreamEvent) bool {
+	select {
+	case out <- ev:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // Emitter accumulates streamed content and frames it as agentcore
 // StreamEvents. It tracks whether the thinking/text blocks are open and
 // builds tool calls by provider index, assigning each block a stable
@@ -62,6 +81,9 @@ func sseData(line string) (string, bool) {
 // this Emitter one Delta per choice via Handle.
 type Emitter struct {
 	Out chan<- ac.StreamEvent
+
+	ctx     context.Context
+	aborted bool
 
 	nextIndex int
 
@@ -88,10 +110,21 @@ type callBuilder struct {
 	started    bool
 }
 
-// NewEmitter builds an Emitter that sends its framed StreamEvents on out.
-func NewEmitter(out chan<- ac.StreamEvent) *Emitter {
-	return &Emitter{Out: out, builders: map[int]*callBuilder{}}
+// NewEmitter builds an Emitter that sends its framed StreamEvents on out. ctx
+// is the request context: once it is done the Emitter stops sending and
+// reports Aborted, so the adapter can drop the rest of the stream.
+func NewEmitter(ctx context.Context, out chan<- ac.StreamEvent) *Emitter {
+	return &Emitter{Out: out, ctx: ctx, builders: map[int]*callBuilder{}}
 }
+
+// Aborted reports whether a send was abandoned because the request context
+// ended. The adapter checks it before sending its own terminal events.
+func (e *Emitter) Aborted() bool { return e.aborted }
+
+// Finish returns the finish_reason seen so far, empty when the provider has
+// not reported one. An empty Finish once the body has ended means the stream
+// was cut short, not that the model stopped.
+func (e *Emitter) Finish() string { return e.finish }
 
 // Handle processes one delta: reasoning first (thinking), then text, then
 // tool calls, recording the finish reason when present. The adapter calls
@@ -180,19 +213,21 @@ func (e *Emitter) closeText() {
 // by final from the accumulated reasoning, text, tool calls and finish
 // reason. The caller decorates the result (Usage, provider-specific
 // metadata) and sends it as the terminal Done event; usage and mid-stream
-// errors are the adapter's concern, not this package's.
+// errors are the adapter's concern, not this package's. Only a stream that
+// actually finished may be flushed: a truncated one has no complete tool call
+// or message to report.
 func (e *Emitter) Flush(final func(reasoning, content string, calls []ToolCall, finish string) ac.Message) ac.Message {
 	e.closeThinking()
 	e.closeText()
 	for _, idx := range e.order {
 		b := e.builders[idx]
 		call := ac.ToolCall{ID: b.id, Name: b.name, Args: RawArgs(b.args.String())}
-		e.Out <- ac.StreamEvent{
+		e.sendEvent(ac.StreamEvent{
 			Type:              ac.StreamEventToolCallEnd,
 			ContentIndex:      b.contentIdx,
 			Message:           e.snapshot(),
 			CompletedToolCall: &call,
-		}
+		})
 	}
 	return final(e.thinking.String(), e.text.String(), e.wireCalls(), e.finish)
 }
@@ -223,9 +258,20 @@ func (e *Emitter) wireCalls() []ToolCall {
 }
 
 func (e *Emitter) send(t ac.StreamEventType, idx int) {
-	e.Out <- ac.StreamEvent{Type: t, ContentIndex: idx, Message: e.snapshot()}
+	e.sendEvent(ac.StreamEvent{Type: t, ContentIndex: idx, Message: e.snapshot()})
 }
 
 func (e *Emitter) sendDelta(t ac.StreamEventType, idx int, delta string) {
-	e.Out <- ac.StreamEvent{Type: t, ContentIndex: idx, Delta: delta, Message: e.snapshot()}
+	e.sendEvent(ac.StreamEvent{Type: t, ContentIndex: idx, Delta: delta, Message: e.snapshot()})
+}
+
+// sendEvent delivers one event, latching Aborted the first time the request
+// context ends so later sends become no-ops and the producer unwinds.
+func (e *Emitter) sendEvent(ev ac.StreamEvent) {
+	if e.aborted {
+		return
+	}
+	if !Send(e.ctx, e.Out, ev) {
+		e.aborted = true
+	}
 }

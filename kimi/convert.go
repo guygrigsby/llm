@@ -93,6 +93,11 @@ func buildRequest(model string, msgs []ac.Message, tools []ac.ToolSpec, cfg ac.C
 		},
 		ReasoningEffort: reasoningEffort(cfg.ThinkingLevel),
 	}
+	// Only set the field when there is a format: a typed nil pointer in the
+	// any field would reach the wire as a JSON null.
+	if cfg.ResponseFormat != nil {
+		req.ResponseFormat = cfg.ResponseFormat
+	}
 	if stream {
 		req.StreamOptions = &streamOptions{IncludeUsage: true}
 	}

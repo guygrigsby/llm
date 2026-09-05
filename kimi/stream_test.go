@@ -132,3 +132,33 @@ func types(evs []ac.StreamEvent) []ac.StreamEventType {
 	}
 	return out
 }
+
+// TestStreamTruncatedMidToolCall proves a stream that ends at EOF without
+// [DONE] and without a finish_reason emits no done event and no tool-call-end,
+// so the agent loop builds a PartialStreamError and retries rather than
+// persisting a half-written tool call. Usage that already arrived is still
+// metered.
+func TestStreamTruncatedMidToolCall(t *testing.T) {
+	payload := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"a\"}}]}}]}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"cached_tokens\":4}}\n\n"
+	srv := sseServer(t, payload)
+	defer srv.Close()
+
+	var metered llm.Usage
+	a, _ := New(Config{APIKey: "k", Model: "kimi-k3", BaseURL: srv.URL, Meter: llm.MeterFunc(func(u llm.Usage) { metered = u })})
+	ch, err := a.GenerateStream(context.Background(), []ac.Message{ac.UserMsg("hi")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range collect(t, ch) {
+		if ev.Type == ac.StreamEventDone {
+			t.Errorf("truncated stream emitted a done event: %+v", ev.Message)
+		}
+		if ev.Type == ac.StreamEventToolCallEnd {
+			t.Errorf("truncated stream emitted a tool-call-end: %+v", ev.CompletedToolCall)
+		}
+	}
+	if metered.TotalTokens != 12 {
+		t.Errorf("usage not metered on a truncated stream: %+v", metered)
+	}
+}
