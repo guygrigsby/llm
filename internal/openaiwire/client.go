@@ -102,7 +102,12 @@ func (c *Client) NewRequest(ctx context.Context, path string, body []byte, apiKe
 	if apiKeyOverride != "" {
 		key = apiKeyOverride
 	}
-	req.Header.Set("Authorization", "Bearer "+key)
+	// An endpoint with no key (a gateway on a private network) gets no
+	// Authorization header at all, rather than an empty bearer that some
+	// strict frontends reject as malformed.
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range c.Headers {
 		if v != "" {

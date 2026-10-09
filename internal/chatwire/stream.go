@@ -1,4 +1,4 @@
-package openrouter
+package chatwire
 
 import (
 	"context"
@@ -10,12 +10,11 @@ import (
 	ac "github.com/voocel/agentcore"
 )
 
-// This file drives OpenRouter's OpenAI-format SSE stream on top of the
-// shared openaiwire.Emitter, translating OpenRouter's own chunk quirks (the
+// This file drives the dialect's OpenAI-format SSE stream on top of the
+// shared openaiwire.Emitter, translating the dialect's own chunk quirks (the
 // reasoning_details array, cost usage, mid-stream error chunks) into the
-// Delta the emitter expects. OpenRouter sends comment lines
-// (": OPENROUTER PROCESSING") as keepalives; openaiwire.ReadSSE skips any
-// line that isn't a "data:" frame.
+// Delta the emitter expects. Gateways send comment lines as keepalives;
+// openaiwire.ReadSSE skips any line that isn't a "data:" frame.
 
 // chatChunk is one SSE data frame from the streaming chat-completions API.
 type chatChunk struct {
@@ -28,11 +27,11 @@ type chatChunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	Usage *wireUsage `json:"usage"`
-	Error *wireError `json:"error"`
+	Usage *WireUsage `json:"usage"`
+	Error *WireError `json:"error"`
 }
 
-// emitSSE reads the SSE body to completion, emitting agentcore stream events
+// EmitSSE reads the SSE body to completion, emitting agentcore stream events
 // via a shared openaiwire.Emitter and reporting usage once through onUsage.
 // A read error (other than clean EOF) or an error chunk becomes a terminal
 // error event, and skips the terminal done event (there is nothing complete
@@ -46,9 +45,9 @@ type chatChunk struct {
 // ctx is the request context. Every send is guarded by it, so a consumer that
 // stops reading releases this goroutine and the HTTP body rather than pinning
 // both for the life of the process.
-func emitSSE(ctx context.Context, r io.Reader, out chan<- ac.StreamEvent, onUsage func(*wireUsage)) {
+func EmitSSE(ctx context.Context, r io.Reader, out chan<- ac.StreamEvent, provider string, onUsage func(*WireUsage)) {
 	em := openaiwire.NewEmitter(ctx, out)
-	var usage *wireUsage
+	var usage *WireUsage
 	var details []json.RawMessage
 	aborted := false
 
@@ -61,7 +60,7 @@ func emitSSE(ctx context.Context, r io.Reader, out chan<- ac.StreamEvent, onUsag
 			// Any thinking or text block still open is left unclosed on
 			// purpose: the agent loop discards the partial message when it
 			// sees an error event, so closing frames would be noise.
-			openaiwire.Send(ctx, out, ac.StreamEvent{Type: ac.StreamEventError, Err: fmt.Errorf("openrouter: %d: %s", chunk.Error.Code, chunk.Error.Message)})
+			openaiwire.Send(ctx, out, ac.StreamEvent{Type: ac.StreamEventError, Err: fmt.Errorf("%s", chunk.Error.Error(provider))})
 			aborted = true
 			return true, nil
 		}
@@ -76,7 +75,7 @@ func emitSSE(ctx context.Context, r io.Reader, out chan<- ac.StreamEvent, onUsag
 	})
 	if err != nil {
 		reportUsage(usage, onUsage)
-		openaiwire.Send(ctx, out, ac.StreamEvent{Type: ac.StreamEventError, Err: fmt.Errorf("openrouter: stream: %w", err)})
+		openaiwire.Send(ctx, out, ac.StreamEvent{Type: ac.StreamEventError, Err: fmt.Errorf("%s: stream: %w", provider, err)})
 		return
 	}
 	if aborted {
@@ -102,7 +101,7 @@ func emitSSE(ctx context.Context, r io.Reader, out chan<- ac.StreamEvent, onUsag
 		return msg
 	})
 	reportUsage(usage, onUsage)
-	final.Usage = toAgentUsage(usage)
+	final.Usage = ToAgentUsage(usage)
 	if em.Aborted() {
 		return
 	}
@@ -110,9 +109,9 @@ func emitSSE(ctx context.Context, r io.Reader, out chan<- ac.StreamEvent, onUsag
 }
 
 // reportUsage hands whatever usage arrived to the meter. Every path out of
-// emitSSE calls it, complete turn or not: the provider billed for the tokens
+// EmitSSE calls it, complete turn or not: the provider billed for the tokens
 // either way, and a cost that never reaches the Meter is a cost nobody sees.
-func reportUsage(u *wireUsage, onUsage func(*wireUsage)) {
+func reportUsage(u *WireUsage, onUsage func(*WireUsage)) {
 	if u != nil && onUsage != nil {
 		onUsage(u)
 	}

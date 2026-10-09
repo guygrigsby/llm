@@ -132,6 +132,29 @@ if err != nil {
 agent := jess.New(jess.WithModel(m) /* , ... */)
 ```
 
+### aperture
+
+`github.com/guygrigsby/llm/aperture`, a native adapter for
+[Aperture](https://github.com/guygrigsby/aperture), the model gateway on the
+tailnet, over its OpenAI-format chat-completions API (the OpenRouter dialect,
+shared with `openrouter` through `internal/chatwire`). The tailnet
+authenticates the host rather than a bearer, so no API key is required (one
+can still be set for a route that asks); the endpoint defaults to
+`https://ai.guy.ts.net/v1` and `BaseURL` overrides it. Model ids are
+Aperture's own, as its `/v1/models` lists them (`anthropic/claude-sonnet-5.5`,
+`moonshotai/kimi-k3`, `qwen-27b`, ...). Full scope matches `openrouter`: SSE
+token streaming, tool calling, the `reasoning` request object and
+`reasoning_details` echo, and usage accounting (cost included where the route
+prices) reaching the `Meter` labelled `aperture`.
+
+```go
+m, err := aperture.New(aperture.Config{Model: "anthropic/claude-sonnet-5.5"})
+if err != nil {
+	return err
+}
+agent := jess.New(jess.WithModel(m) /* , ... */)
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

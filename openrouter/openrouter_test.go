@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/guygrigsby/llm"
+	"github.com/guygrigsby/llm/internal/chatwire"
 	ac "github.com/voocel/agentcore"
 )
 
@@ -66,7 +67,7 @@ func TestGenerateTextAndHeaders(t *testing.T) {
 }
 
 func TestGenerateToolCall(t *testing.T) {
-	var body chatRequest
+	var body chatwire.ChatRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Denver\"}"}}]},"finish_reason":"tool_calls"}]}`))
@@ -115,7 +116,7 @@ func TestGenerateReasoning(t *testing.T) {
 }
 
 func TestReasoningEffortSent(t *testing.T) {
-	var body chatRequest
+	var body chatwire.ChatRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
@@ -129,7 +130,7 @@ func TestReasoningEffortSent(t *testing.T) {
 	if body.Reasoning == nil || body.Reasoning.Effort != "xhigh" {
 		t.Errorf("reasoning = %+v, want effort xhigh", body.Reasoning)
 	}
-	body = chatRequest{}
+	body = chatwire.ChatRequest{}
 	if _, err := a.Generate(context.Background(), []ac.Message{ac.UserMsg("q")}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +140,7 @@ func TestReasoningEffortSent(t *testing.T) {
 }
 
 func TestReasoningDetailsEchoed(t *testing.T) {
-	var body chatRequest
+	var body chatwire.ChatRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"done"},"finish_reason":"stop"}]}`))
@@ -171,7 +172,7 @@ func TestReasoningDetailsEchoed(t *testing.T) {
 }
 
 func TestPlaintextReasoningEchoedWithoutDetails(t *testing.T) {
-	var body chatRequest
+	var body chatwire.ChatRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"done"},"finish_reason":"stop"}]}`))
@@ -216,7 +217,7 @@ func TestGenerateBodyError(t *testing.T) {
 }
 
 func TestSamplerParamsSent(t *testing.T) {
-	var body chatRequest
+	var body chatwire.ChatRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
@@ -275,7 +276,7 @@ func TestGenerateMeters(t *testing.T) {
 // survives a JSON round-trip of history: agentcore metadata that has been
 // marshalled and unmarshalled comes back as []any, not json.RawMessage.
 func TestReasoningDetailsEchoedAfterRoundTrip(t *testing.T) {
-	var body chatRequest
+	var body chatwire.ChatRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"done"},"finish_reason":"stop"}]}`))
@@ -310,11 +311,11 @@ func TestReasoningDetailsEchoedAfterRoundTrip(t *testing.T) {
 // TestReasoningEffortOff proves ThinkingOff maps to OpenRouter's "none", which
 // actually disables reasoning; only an unspecified level omits the object.
 func TestReasoningEffortOff(t *testing.T) {
-	if got := reasoningEffort(ac.ThinkingOff); got != "none" {
-		t.Errorf("reasoningEffort(off) = %q, want none", got)
+	if got := chatwire.ReasoningEffort(ac.ThinkingOff); got != "none" {
+		t.Errorf("chatwire.ReasoningEffort(off) = %q, want none", got)
 	}
-	if got := reasoningEffort(""); got != "" {
-		t.Errorf("reasoningEffort(unspecified) = %q, want empty", got)
+	if got := chatwire.ReasoningEffort(""); got != "" {
+		t.Errorf("chatwire.ReasoningEffort(unspecified) = %q, want empty", got)
 	}
 }
 

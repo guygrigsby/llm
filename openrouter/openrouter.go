@@ -12,6 +12,11 @@
 //     reasoning_details echoed back on assistant messages so a model keeps its
 //     chain of thought across tool calls,
 //   - usage accounting: cost and cached prompt tokens reach the Meter.
+//
+// The wire dialect itself lives in internal/chatwire, shared with the
+// aperture adapter: OpenRouter is the reference speaker of that dialect, and
+// gateways that speak it differ only in endpoint, auth and attribution
+// headers, which are this package's.
 package openrouter
 
 import (
@@ -24,6 +29,7 @@ import (
 	"time"
 
 	"github.com/guygrigsby/llm"
+	"github.com/guygrigsby/llm/internal/chatwire"
 	"github.com/guygrigsby/llm/internal/openaiwire"
 	ac "github.com/voocel/agentcore"
 )
@@ -36,6 +42,9 @@ const defaultBaseURL = "https://openrouter.ai/api/v1"
 // adapter gives up on it. Long thinking pauses are normal, a two minute
 // silence is a stuck connection.
 const defaultStreamIdle = 2 * time.Minute
+
+// providerName labels this adapter's usage and errors.
+const providerName = "openrouter"
 
 // Config configures the adapter. APIKey and Model are required; Model is an
 // OpenRouter model id such as "moonshotai/kimi-k3". BaseURL defaults to
@@ -123,24 +132,24 @@ func (a *Adapter) SupportsTools() bool { return true }
 func (a *Adapter) ProviderName() string { return providerName }
 
 // observe reports usage to the configured Meter, if any.
-func (a *Adapter) observe(u *wireUsage, latency time.Duration) {
+func (a *Adapter) observe(u *chatwire.WireUsage, latency time.Duration) {
 	if a.meter == nil || u == nil {
 		return
 	}
-	a.meter.Observe(toLLMUsage(a.model, u, latency))
+	a.meter.Observe(chatwire.ToLLMUsage(providerName, a.model, u, latency))
 }
 
 // Generate runs a one-shot chat completion.
 func (a *Adapter) Generate(ctx context.Context, msgs []ac.Message, tools []ac.ToolSpec, opts ...ac.CallOption) (*ac.LLMResponse, error) {
 	cfg := ac.ResolveCallConfig(opts)
-	req := buildRequest(a.model, msgs, tools, cfg, genParams{Temperature: a.temperature, TopP: a.topP}, false)
+	req := chatwire.BuildRequest(a.model, msgs, tools, cfg, chatwire.GenParams{Temperature: a.temperature, TopP: a.topP}, false)
 
 	start := time.Now()
 	data, err := a.client.Post(ctx, "/chat/completions", req, cfg.APIKey)
 	if err != nil {
 		return nil, err
 	}
-	var cr chatResponse
+	var cr chatwire.ChatResponse
 	if err := json.Unmarshal(data, &cr); err != nil {
 		return nil, fmt.Errorf("openrouter: decode: %w", err)
 	}
@@ -148,12 +157,12 @@ func (a *Adapter) Generate(ctx context.Context, msgs []ac.Message, tools []ac.To
 	// billed for whatever it consumed, and that cost belongs in the Meter.
 	a.observe(cr.Usage, time.Since(start))
 	if cr.Error != nil {
-		return nil, fmt.Errorf("openrouter: %d: %s", cr.Error.Code, cr.Error.Message)
+		return nil, fmt.Errorf("%s", cr.Error.Error(providerName))
 	}
 	if len(cr.Choices) == 0 {
 		return nil, errors.New("openrouter: response had no choices")
 	}
-	return &ac.LLMResponse{Message: convertResponse(&cr)}, nil
+	return &ac.LLMResponse{Message: chatwire.ConvertResponse(&cr)}, nil
 }
 
 // GenerateStream runs a streaming chat completion, emitting the agentcore
@@ -163,7 +172,7 @@ func (a *Adapter) Generate(ctx context.Context, msgs []ac.Message, tools []ac.To
 // event on failure.
 func (a *Adapter) GenerateStream(ctx context.Context, msgs []ac.Message, tools []ac.ToolSpec, opts ...ac.CallOption) (<-chan ac.StreamEvent, error) {
 	cfg := ac.ResolveCallConfig(opts)
-	req := buildRequest(a.model, msgs, tools, cfg, genParams{Temperature: a.temperature, TopP: a.topP}, true)
+	req := chatwire.BuildRequest(a.model, msgs, tools, cfg, chatwire.GenParams{Temperature: a.temperature, TopP: a.topP}, true)
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -179,7 +188,7 @@ func (a *Adapter) GenerateStream(ctx context.Context, msgs []ac.Message, tools [
 	go func() {
 		defer close(out)
 		defer func() { _ = sse.Close() }()
-		emitSSE(ctx, sse, out, func(u *wireUsage) { a.observe(u, time.Since(start)) })
+		chatwire.EmitSSE(ctx, sse, out, providerName, func(u *chatwire.WireUsage) { a.observe(u, time.Since(start)) })
 	}()
 	return out, nil
 }
