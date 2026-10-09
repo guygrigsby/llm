@@ -134,9 +134,8 @@ agent := jess.New(jess.WithModel(m) /* , ... */)
 
 ### aperture
 
-`github.com/guygrigsby/llm/aperture`, a native adapter for
-[Aperture](https://github.com/guygrigsby/aperture), the model gateway on the
-tailnet, over its OpenAI-format chat-completions API (the OpenRouter dialect,
+`github.com/guygrigsby/llm/aperture`, a native adapter for Aperture, the
+Tailscale model gateway on the tailnet, over its OpenAI-format chat-completions API (the OpenRouter dialect,
 shared with `openrouter` through `internal/chatwire`). The tailnet
 authenticates the host rather than a bearer, so no API key is required (one
 can still be set for a route that asks); the endpoint defaults to
