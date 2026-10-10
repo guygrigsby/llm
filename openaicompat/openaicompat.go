@@ -41,7 +41,9 @@ type Config struct {
 	BaseURL string
 	// APIKey is optional: local servers often take none, and the header is
 	// left off when it is empty. agentcore.WithAPIKey overrides it per call,
-	// so one adapter can carry many users' keys.
+	// so one adapter can carry many users' keys. Leave it empty on an adapter
+	// that serves user endpoints: a call with no per-call key falls back to
+	// it, which would send this key to that user's endpoint.
 	APIKey string
 	// Transport, if set, carries every request. A host calling a
 	// user-supplied URL installs its SSRF-restricting dialer here.

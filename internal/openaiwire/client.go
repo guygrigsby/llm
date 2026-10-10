@@ -88,7 +88,7 @@ func (c *Client) Stream(ctx context.Context, path string, body []byte, apiKeyOve
 	if err != nil {
 		return nil, err
 	}
-	return newIdleReader(resp.Body, c.StreamIdle), nil
+	return newIdleReader(newCapReader(resp.Body, maxStreamBytes), c.StreamIdle), nil
 }
 
 // NewRequest builds an authenticated JSON POST, with any configured extra
@@ -139,9 +139,12 @@ func (c *Client) send(ctx context.Context, httpc *http.Client, path string, body
 			return resp, nil
 		}
 
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		// Only a prefix is read: the message (and any context-overflow marker)
+		// is at the start, and the body is endpoint-controlled.
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 		_ = resp.Body.Close()
-		lastErr = classifyError(fmt.Errorf("%s: %s: %s", c.Provider, resp.Status, strings.TrimSpace(string(msg))), string(msg))
+		text := Sanitize(strings.TrimSpace(string(msg)), MaxErrorText)
+		lastErr = classifyError(fmt.Errorf("%s: %s: %s", c.Provider, resp.Status, text), string(msg))
 		if !retryableStatus(resp.StatusCode) || attempt == maxAttempts-1 {
 			return nil, lastErr
 		}

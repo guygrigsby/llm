@@ -3,6 +3,9 @@ package openaiwire
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -26,29 +29,35 @@ import (
 // A false done with a nil error means the body simply ended: the response may
 // be truncated mid message, so the caller must not treat what it accumulated
 // as a complete turn unless a finish_reason arrived.
+//
+// A line longer than maxSSELine fails the stream: no real chunk is that big,
+// and buffering one without limit lets an endpoint exhaust memory.
 func ReadSSE(r io.Reader, onData func(data string) (stop bool, err error)) (done bool, err error) {
-	br := bufio.NewReader(r)
-	for {
-		line, readErr := br.ReadString('\n')
-		if data, ok := sseData(line); ok {
-			if data == "[DONE]" {
-				return true, nil
-			}
-			stop, onErr := onData(data)
-			if onErr != nil {
-				return false, onErr
-			}
-			if stop {
-				return false, nil
-			}
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64<<10), maxSSELine)
+	for sc.Scan() {
+		data, ok := sseData(sc.Text())
+		if !ok {
+			continue
 		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				return false, readErr
-			}
+		if data == "[DONE]" {
+			return true, nil
+		}
+		stop, onErr := onData(data)
+		if onErr != nil {
+			return false, onErr
+		}
+		if stop {
 			return false, nil
 		}
 	}
+	if err := sc.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return false, fmt.Errorf("sse line over %d bytes: %w", maxSSELine, err)
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 // sseData extracts the payload of a `data:` SSE line, or ok=false for blank
@@ -106,8 +115,11 @@ type callBuilder struct {
 	contentIdx int
 	id         string
 	name       string
-	args       strings.Builder
-	started    bool
+	// args is a byte slice rather than a strings.Builder so live snapshots
+	// can share it without copying: appends only write past every length a
+	// snapshot has seen.
+	args    []byte
+	started bool
 }
 
 // NewEmitter builds an Emitter that sends its framed StreamEvents on out. ctx
@@ -131,6 +143,9 @@ func (e *Emitter) Finish() string { return e.finish }
 // Handle once per choice in its chunk (and, when a provider can attach more
 // than one reasoning fragment to a single chunk, once more per fragment).
 func (e *Emitter) Handle(d Delta, finish string) {
+	if e.aborted {
+		return
+	}
 	if finish != "" {
 		e.finish = finish
 	}
@@ -173,6 +188,10 @@ func (e *Emitter) onToolCall(tc StreamToolCall) {
 	e.closeText()
 	b := e.builders[tc.Index]
 	if b == nil {
+		if len(e.builders) >= maxToolCalls {
+			e.fail(fmt.Errorf("stream: more than %d tool calls in one turn", maxToolCalls))
+			return
+		}
 		b = &callBuilder{contentIdx: e.nextIndex}
 		e.nextIndex++
 		e.builders[tc.Index] = b
@@ -189,7 +208,7 @@ func (e *Emitter) onToolCall(tc StreamToolCall) {
 		e.send(ac.StreamEventToolCallStart, b.contentIdx)
 	}
 	if tc.Function.Arguments != "" {
-		b.args.WriteString(tc.Function.Arguments)
+		b.args = append(b.args, tc.Function.Arguments...)
 		e.sendDelta(ac.StreamEventToolCallDelta, b.contentIdx, tc.Function.Arguments)
 	}
 }
@@ -221,7 +240,7 @@ func (e *Emitter) Flush(final func(reasoning, content string, calls []ToolCall, 
 	e.closeText()
 	for _, idx := range e.order {
 		b := e.builders[idx]
-		call := ac.ToolCall{ID: b.id, Name: b.name, Args: RawArgs(b.args.String())}
+		call := ac.ToolCall{ID: b.id, Name: b.name, Args: RawArgs(string(b.args))}
 		e.sendEvent(ac.StreamEvent{
 			Type:              ac.StreamEventToolCallEnd,
 			ContentIndex:      b.contentIdx,
@@ -233,9 +252,36 @@ func (e *Emitter) Flush(final func(reasoning, content string, calls []ToolCall, 
 }
 
 // snapshot builds the partial message from accumulated state (no stop
-// reason), attached to each live event so a consumer can render progress.
+// reason), attached to each live event so a consumer can render progress. It
+// is built on every delta, so it must not copy what has accumulated: that
+// made a turn's cost quadratic in its length. Text comes from the builders
+// without copying and tool-call args share the accumulating bytes, capped so
+// a consumer's append can't write into them. Block order matches
+// AssembleMessage.
 func (e *Emitter) snapshot() ac.Message {
-	return AssembleMessage(e.thinking.String(), e.text.String(), e.wireCalls(), "")
+	var blocks []ac.ContentBlock
+	if e.thinking.Len() > 0 {
+		blocks = append(blocks, ac.ThinkingBlock(e.thinking.String()))
+	}
+	if e.text.Len() > 0 {
+		blocks = append(blocks, ac.TextBlock(e.text.String()))
+	}
+	for _, idx := range e.order {
+		b := e.builders[idx]
+		args := json.RawMessage("{}")
+		if n := len(b.args); n > 0 {
+			args = json.RawMessage(b.args[:n:n])
+		}
+		blocks = append(blocks, ac.ToolCallBlock(ac.ToolCall{ID: b.id, Name: b.name, Args: args}))
+	}
+	return ac.Message{Role: ac.RoleAssistant, Content: blocks, StopReason: MapStopReason("")}
+}
+
+// fail ends the stream with an error event; later sends become no-ops and
+// Aborted reports true, so the adapter sends no terminal message.
+func (e *Emitter) fail(err error) {
+	e.sendEvent(ac.StreamEvent{Type: ac.StreamEventError, Err: err})
+	e.aborted = true
 }
 
 // wireCalls renders the accumulated tool-call builders as wire tool calls,
@@ -251,7 +297,7 @@ func (e *Emitter) wireCalls() []ToolCall {
 		calls = append(calls, ToolCall{
 			ID:       b.id,
 			Type:     "function",
-			Function: Func{Name: b.name, Arguments: b.args.String()},
+			Function: Func{Name: b.name, Arguments: string(b.args)},
 		})
 	}
 	return calls

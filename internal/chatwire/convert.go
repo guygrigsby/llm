@@ -57,11 +57,13 @@ type WireError struct {
 }
 
 // Error renders the block for the given provider name.
+// The message is endpoint-chosen, so it is sanitized and bounded.
 func (e *WireError) Error(provider string) string {
+	msg := openaiwire.Sanitize(e.Message, openaiwire.MaxErrorText)
 	if e.Code != 0 {
-		return provider + ": " + strconv.Itoa(e.Code) + ": " + e.Message
+		return provider + ": " + strconv.Itoa(e.Code) + ": " + msg
 	}
-	return provider + ": " + e.Message
+	return provider + ": " + msg
 }
 
 // ChatResponse is a non-stream chat completion in the dialect.
