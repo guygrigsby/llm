@@ -154,6 +154,28 @@ if err != nil {
 agent := jess.New(jess.WithModel(m) /* , ... */)
 ```
 
+### openaicompat
+
+`github.com/guygrigsby/llm/openaicompat`, for any server whose native API is
+plain OpenAI chat completions: a user's own endpoint (vLLM, llama.cpp, Ollama,
+LM Studio, a hosted provider) that the caller can't know in advance. It sends
+only the shape every compatible server shares: `max_tokens`,
+`reasoning_effort` only when the call sets a thinking level, and no reasoning
+echo on assistant history. `BaseURL` and `Model` are required; `APIKey` is
+optional and `agentcore.WithAPIKey` overrides it per call, so one adapter can
+carry many users' keys. `Transport` carries every request, for a host that
+must restrict where user-supplied URLs can reach. SSE token streaming and tool
+calling; usage reaches the `Meter` labelled `openaicompat` when the server
+reports it.
+
+```go
+m, err := openaicompat.New(openaicompat.Config{BaseURL: userURL, Model: userModel, Transport: restricted})
+if err != nil {
+	return err
+}
+resp, err := m.Generate(ctx, msgs, nil, agentcore.WithAPIKey(userKey))
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
