@@ -2,8 +2,10 @@ package aperture
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -147,5 +149,36 @@ func TestStreamAssembles(t *testing.T) {
 	}
 	if got.Provider != "aperture" || got.TotalTokens != 7 || got.Cost != 0.0001 {
 		t.Errorf("metered = %+v", got)
+	}
+}
+
+func TestListModels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer k" {
+			t.Errorf("auth = %q", r.Header.Get("Authorization"))
+		}
+		fmt.Fprint(w, `{"data":[{"id":"anthropic/claude-sonnet-5.5"},{"id":"qwen-27b"},{"id":""}]}`)
+	}))
+	defer srv.Close()
+	got, err := ListModels(t.Context(), srv.URL+"/v1", "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"anthropic/claude-sonnet-5.5", "qwen-27b"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestListModelsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	if _, err := ListModels(t.Context(), srv.URL, ""); err == nil {
+		t.Fatal("want error on 401")
 	}
 }

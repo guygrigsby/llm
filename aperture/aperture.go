@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -101,6 +102,49 @@ func New(cfg Config) (*Adapter, error) {
 		temperature: cfg.Temperature,
 		topP:        cfg.TopP,
 	}, nil
+}
+
+// ListModels returns Aperture's live model ids, as its /v1/models lists
+// them. Empty baseURL uses the tailnet default; an API key is sent when
+// given (the gateway usually authenticates by host instead). It exists for
+// callers that need the registry, not a chat client: routing stacks read it
+// to build their runtime offers.
+func ListModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
+	if baseURL == "" {
+		baseURL = defaultBaseURL
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("aperture: list models: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return nil, fmt.Errorf("aperture: list models: decode: %w", err)
+	}
+	ids := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		if m.ID != "" {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids, nil
 }
 
 // SupportsTools reports true: this adapter wires OpenAI-format tool calling.
