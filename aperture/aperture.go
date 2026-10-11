@@ -104,12 +104,35 @@ func New(cfg Config) (*Adapter, error) {
 	}, nil
 }
 
-// ListModels returns Aperture's live model ids, as its /v1/models lists
-// them. Empty baseURL uses the tailnet default; an API key is sent when
-// given (the gateway usually authenticates by host instead). It exists for
-// callers that need the registry, not a chat client: routing stacks read it
-// to build their runtime offers.
-func ListModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
+// ModelInfo is one /v1/models entry, reduced to what routing stacks read.
+// Zero values mean the gateway did not say: a local model usually carries no
+// context window and no price, and that is unknown, not free.
+type ModelInfo struct {
+	ID string
+	// Provider is the gateway's provider id for the entry (the machine or
+	// vendor account behind it), not the model's vendor.
+	Provider string
+	// Endpoints are the paths the gateway serves the model on, as
+	// supported_endpoints lists them. This adapter speaks /v1/chat/completions.
+	Endpoints []string
+	// RequiresClientAuth is true when the caller must bring its own
+	// credential; the gateway does not authenticate the host for it.
+	RequiresClientAuth bool
+	ContextTokens      int64
+	MaxOutputTokens    int64
+	// InputPrice and OutputPrice are USD per token, as the gateway prints
+	// them (a decimal string), empty when unpriced. Tiered and fast-mode
+	// rates are not read.
+	InputPrice  string
+	OutputPrice string
+}
+
+// ListModelInfo returns Aperture's live registry entries, as its /v1/models
+// lists them. Empty baseURL uses the tailnet default; an API key is sent
+// when given (the gateway usually authenticates by host instead). It exists
+// for callers that need the registry, not a chat client: routing stacks read
+// it to build their runtime offers.
+func ListModelInfo(ctx context.Context, baseURL, apiKey string) ([]ModelInfo, error) {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
@@ -132,17 +155,50 @@ func ListModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
 	}
 	var out struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID                  string   `json:"id"`
+			SupportedEndpoints  []string `json:"supported_endpoints"`
+			ContextWindowTokens int64    `json:"context_window_tokens"`
+			MaxOutputTokens     int64    `json:"max_output_tokens"`
+			Metadata            struct {
+				Provider struct {
+					ID                 string `json:"id"`
+					RequiresClientAuth bool   `json:"requires_client_auth"`
+				} `json:"provider"`
+			} `json:"metadata"`
+			Pricing struct {
+				Input  string `json:"input"`
+				Output string `json:"output"`
+			} `json:"pricing"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
 		return nil, fmt.Errorf("aperture: list models: decode: %w", err)
 	}
-	ids := make([]string, 0, len(out.Data))
+	infos := make([]ModelInfo, 0, len(out.Data))
 	for _, m := range out.Data {
-		if m.ID != "" {
-			ids = append(ids, m.ID)
+		if m.ID == "" {
+			continue
 		}
+		infos = append(infos, ModelInfo{
+			ID: m.ID, Provider: m.Metadata.Provider.ID, Endpoints: m.SupportedEndpoints,
+			RequiresClientAuth: m.Metadata.Provider.RequiresClientAuth,
+			ContextTokens:      m.ContextWindowTokens, MaxOutputTokens: m.MaxOutputTokens,
+			InputPrice: m.Pricing.Input, OutputPrice: m.Pricing.Output,
+		})
+	}
+	return infos, nil
+}
+
+// ListModels returns Aperture's live model ids, as its /v1/models lists
+// them. See ListModelInfo for the rest of each entry.
+func ListModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
+	infos, err := ListModelInfo(ctx, baseURL, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(infos))
+	for i, m := range infos {
+		ids[i] = m.ID
 	}
 	return ids, nil
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -180,5 +181,28 @@ func TestListModelsError(t *testing.T) {
 	defer srv.Close()
 	if _, err := ListModels(t.Context(), srv.URL, ""); err == nil {
 		t.Fatal("want error on 401")
+	}
+}
+
+func TestListModelInfo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[
+{"id":"anthropic/claude-sonnet-5","supported_endpoints":["/v1/messages","/v1/chat/completions"],"context_window_tokens":1000000,"max_output_tokens":128000,"metadata":{"provider":{"id":"aperture","requires_client_auth":false}},"pricing":{"input":"0.00000200","output":"0.00001000","fast":{"input":"0.1"}}},
+{"id":"qwen-27b","supported_endpoints":["/v1/chat/completions"],"metadata":{"provider":{"id":"trig","requires_client_auth":false}}},
+{"id":"claude-sonnet-5","supported_endpoints":["/v1/messages"],"metadata":{"provider":{"id":"anthropic-sub","requires_client_auth":true}}},
+{"id":""}]}`)
+	}))
+	defer srv.Close()
+	got, err := ListModelInfo(t.Context(), srv.URL+"/v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ModelInfo{
+		{ID: "anthropic/claude-sonnet-5", Provider: "aperture", Endpoints: []string{"/v1/messages", "/v1/chat/completions"}, ContextTokens: 1000000, MaxOutputTokens: 128000, InputPrice: "0.00000200", OutputPrice: "0.00001000"},
+		{ID: "qwen-27b", Provider: "trig", Endpoints: []string{"/v1/chat/completions"}},
+		{ID: "claude-sonnet-5", Provider: "anthropic-sub", Endpoints: []string{"/v1/messages"}, RequiresClientAuth: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v\nwant %+v", got, want)
 	}
 }
